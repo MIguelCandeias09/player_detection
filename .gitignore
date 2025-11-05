@@ -1,0 +1,17 @@
+/roboflow_sports_footar/datasets_and_models/
+/datasets_and_models/
+/OriginalVideosUncut/
+/roboflow_sports_footar/venv/
+*.md
+/roboflow_sports_footar/videos/
+/roboflow_sports_footar/notebooks/datasets
+
+# Ignore large model files
+*.pt
+# Ignore video files
+*.mp4
+*.avi
+*.mov
+# Ignore large weight files in runs
+/roboflow_sports_footar/notebooks/runs/
+/roboflow_sports_footar/runs/
