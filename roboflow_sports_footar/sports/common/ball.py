@@ -82,23 +82,47 @@ class BallTracker:
 
     def update(self, detections: sv.Detections) -> sv.Detections:
         """
-        Updates the buffer with new detections and returns the detection closest to the
-        centroid of recent positions.
+        Updates the buffer with new detections and returns the BEST detection.
+        Strategy: ALWAYS prefer highest confidence (ball has high conf, feet have low conf)
 
         Args:
             detections (sv.Detections): The current frame's ball detections.
 
         Returns:
-            sv.Detections: The detection closest to the centroid of recent positions.
+            sv.Detections: The best detection (highest confidence).
             If there are no detections, returns the input detections.
         """
-        xy = detections.get_anchors_coordinates(sv.Position.CENTER)
-        self.buffer.append(xy)
-
         if len(detections) == 0:
             return detections
-
-        centroid = np.mean(np.concatenate(self.buffer), axis=0)
-        distances = np.linalg.norm(xy - centroid, axis=1)
-        index = np.argmin(distances)
-        return detections[[index]]
+        
+        xy = detections.get_anchors_coordinates(sv.Position.CENTER)
+        
+        # 🎯 STRATEGY: ALWAYS prefer highest confidence (rejects feet with low conf)
+        # Only use distance validation if we have history
+        if len(self.buffer) > 2:
+            centroid = np.mean(np.concatenate(self.buffer), axis=0)
+            distances = np.linalg.norm(xy - centroid, axis=1)
+            
+            # ⚠️ Reject detections TOO FAR from history (> 300px = teleport)
+            max_distance = 300  # Ball can't teleport more than 300px between frames
+            valid_mask = distances < max_distance
+            
+            if np.any(valid_mask):
+                # Filter to valid detections, then pick highest confidence
+                valid_indices = np.where(valid_mask)[0]
+                best_among_valid = valid_indices[np.argmax(detections.confidence[valid_indices])]
+                selected_detection = detections[[best_among_valid]]
+            else:
+                # All detections too far - trust highest confidence anyway (might be correct)
+                best_idx = np.argmax(detections.confidence)
+                selected_detection = detections[[best_idx]]
+        else:
+            # No history yet - just pick highest confidence
+            best_idx = np.argmax(detections.confidence)
+            selected_detection = detections[[best_idx]]
+        
+        # Update buffer with selected detection
+        selected_xy = selected_detection.get_anchors_coordinates(sv.Position.CENTER)
+        self.buffer.append(selected_xy)
+        
+        return selected_detection

@@ -1,0 +1,44 @@
+# BoT-SORT Tracker Configuration for Football/Soccer
+# =================================================
+# Optimized for football match recordings with camera panning/zooming
+#
+# Key Features:
+# - GMC (Global Motion Compensation) using Sparse Optical Flow
+# - High track buffer (60 frames = ~2.4s @ 25fps) for occlusions
+# - Low detection threshold to handle motion blur/partial visibility
+# - Aggressive matching for fast-moving players
+
+tracker_type: botsort  # BoT-SORT with GMC support
+
+# Track Management
+track_high_thresh: 0.6   # Threshold for high-confidence track initialization
+track_low_thresh: 0.1    # Accept weak detections (motion blur, partial occlusion)
+new_track_thresh: 0.7    # Threshold for creating new tracks
+track_buffer: 60         # Keep lost tracks for 60 frames (~2.4s @ 25fps)
+match_thresh: 0.8        # IOU threshold for matching detections to tracks
+fuse_score: true         # Fuse confidence score with IOU for better matching
+
+# Global Motion Compensation (CRITICAL for football)
+# Compensates for camera panning, tilting, and zooming
+gmc_method: sparseOptFlow  # Options: orb, sift, ecc, sparseOptFlow, none
+                           # sparseOptFlow: Best balance speed/accuracy for sports
+
+# ReID (Re-Identification) - Appearance-based matching
+# Helps re-identify players after long occlusions
+with_reid: false         # Enable/disable ReID (appearance matching)
+                         # false = faster, true = more robust (requires ReID model)
+proximity_thresh: 0.5    # Spatial distance threshold for ReID
+appearance_thresh: 0.25  # Appearance similarity threshold (lower = stricter)
+model: auto              # ReID model path or 'auto' (osnet_x0_25_msmt17.pt)
+
+# Kalman Filter Parameters
+# Predicts player positions between frames
+# Football players have complex motion (acceleration, deceleration, direction changes)
+# Default values work well, but can be tuned if needed
+
+# Performance Tuning
+# For real-time processing, consider:
+# - gmc_method: none (disables GMC, faster but less accurate)
+# - track_buffer: 30 (reduces memory, faster)
+# For offline/quality priority:
+# - Keep current settings (GMC enabled, high buffer)

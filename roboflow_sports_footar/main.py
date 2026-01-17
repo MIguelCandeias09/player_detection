@@ -24,33 +24,28 @@ except ImportError:
 print('importing sports files')
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
+from sports.common.ball_interpolator import RealTimeBallInterpolator, InterpolatedBallAnnotator
 from sports.common.team import TeamClassifier
 from sports.common.view import ViewTransformer
 from sports.configs.soccer import SoccerPitchConfiguration
 
 
-# Norfair imports (optional)
-try:
-    from norfair import Detection as NorfairDetection, Tracker as NorfairTracker
-    from norfair import distances as norfair_distances
-except Exception:
-    NorfairDetection = None
-    NorfairTracker = None
-    norfair_distances = None
-    print('Norfair not available - please pip install norfair to enable improved tracking')
-
-
 PARENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Use the existing trained models for players and pitch
-PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-player-detection_mike.pt')
+
+# BoT-SORT Tracker Configuration (with GMC for camera motion compensation)
+BOTSORT_CONFIG_PATH = os.path.join(PARENT_DIR, 'futebol_botsort.yaml')
+# Use the newly trained YOLOv12m player detector (98.9% player mAP50, 97.1% goalkeeper, 96.7% referee)
+PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/player_y12l_footar_best.pt')
+# PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-player-detection_mike.pt')  # old model
 # PLAYER_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/yolo12s.pt')
 # PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-pitch-detection.pt')
 # PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-pitch-detection-mike_1280.pt')
 PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-pitch-detection-mike_640_v11m.pt')  # Modelo anterior (mais estável)
 # PITCH_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/pitch_y11x_keypoint_best.pt')  # YOLOv11x-pose 32-keypoint (65.8% mAP50) - PRECISA MELHORIAS
-# Use the newly trained YOLOv12 ball detector weights (optimized version)
-BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/ball_y12s_optimized_best.pt')
-# BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/ball_y12s_best.pt')  # previous version (recall 30%)
+# Use the newly trained YOLOv11m ball detector (74.6% mAP50, 68.0% recall, 87.9% precision @ 1024px)
+BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/ball_y11m_footar_best.pt')
+# BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/ball_y12s_optimized_best.pt')  # previous version
+# BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/ball_y12s_best.pt')  # old version (recall 30%)
 # BALL_DETECTION_MODEL_PATH = os.path.join(PARENT_DIR, 'data/football-ball-detection.pt')   # this model is too slow
 
 BALL_CLASS_ID = 0
@@ -61,9 +56,9 @@ REFEREE_CLASS_ID = 3
 STRIDE = 5
 CONFIG = SoccerPitchConfiguration()
 
-# COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700', '#8000FF']
-#          Team 1     Team 2     Goalkeeper Referee
-COLORS = ['#c7c7c7', '#1055e8', '#FF6347', '#FFD700', '#8000FF']
+# Team colors: Team 0 (Red), Team 1 (Blue), Goalkeeper (Orange), Referee (Yellow)
+#          Team 0     Team 1     Goalkeeper Referee
+COLORS = ['#FF1744', '#2196F3', '#FF6347', '#FFD700', '#8000FF']
 VERTEX_LABEL_ANNOTATOR = sv.LabelAnnotator(
     color=[sv.Color.from_hex(color) for color in CONFIG.colors],
     text_color=sv.Color.from_hex('#FFFFFF'),
@@ -153,61 +148,8 @@ def get_crops_with_tracker_id(frame: np.ndarray, detections: sv.Detections) -> L
     return [sv.crop_image(frame, xyxy) for xyxy in detections.xyxy], [tracker_id for tracker_id in detections.tracker_id]
 
 
-def init_norfair_tracker(distance_threshold: float = 80.0) -> object:
-    """Initialize a Norfair tracker with a reasonable pixel distance threshold.
-
-    Returns a Tracker instance or None if Norfair is not installed.
-    """
-    if NorfairTracker is None:
-        return None
-    
-    # Use scalar euclidean distance (simple and works)
-    def euclidean_distance(detection, tracked_object):
-        """Calculate euclidean distance between a detection and tracked object."""
-        return np.linalg.norm(detection.points - tracked_object.estimate)
-    
-    return NorfairTracker(
-        distance_function=euclidean_distance, 
-        distance_threshold=distance_threshold
-    )
-
-
-def norfair_update_and_get_ids(tracker: object, detections: sv.Detections) -> List[object]:
-    """Update Norfair tracker with detections and return a list of tracker ids aligned with detections order.
-
-    We use the bottom-center (anchor) of each detection as the single point to track.
-    If Norfair is not available or there are no detections, returns a list of None with matching length.
-    """
-    if tracker is None or NorfairDetection is None:
-        # return placeholder None ids
-        return [None] * len(detections)
-
-    centers = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
-    if centers is None or len(centers) == 0:
-        return [None] * len(detections)
-
-    # Create Norfair detections with data payload containing original index
-    norfair_dets = [
-        NorfairDetection(points=cent.reshape(1, 2), data={'index': i}) 
-        for i, cent in enumerate(centers)
-    ]
-    
-    # Update tracker
-    tracked_objects = tracker.update(detections=norfair_dets)
-
-    # Initialize IDs array with None
-    ids = [None] * len(detections)
-    
-    # Map tracked objects back to detection indices using data payload
-    for to in tracked_objects:
-        if to.last_detection is not None and to.last_detection.data is not None:
-            idx = to.last_detection.data.get('index')
-            if idx is not None and idx < len(ids):
-                ids[idx] = to.id
-
-    return ids
-
-    return ids
+# BoT-SORT tracking is now handled natively by YOLO model.track()
+# No need for external tracker initialization or ID mapping functions
 
 
 def resolve_goalkeepers_team_id(
@@ -271,6 +213,11 @@ def render_radar(
     color_lookup: np.ndarray
 ) -> np.ndarray:
 
+    # ⚠️ PROTEÇÃO: Verificar se keypoints não está vazio
+    if keypoints is None or len(keypoints.xy) == 0 or len(keypoints.xy[0]) == 0:
+        # Sem keypoints - retornar radar vazio
+        return np.zeros((CONFIG.width, CONFIG.length, 3), dtype=np.uint8)
+    
     # Filter keypoints: use only those with HIGH confidence (actually detected by model)
     # This prevents the model from "searching" for invisible keypoints
     if keypoints.confidence is not None and len(keypoints.confidence) > 0:
@@ -281,6 +228,13 @@ def render_radar(
         mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
     
     # print('mask', mask)
+    
+    # ⚠️ PROTEÇÃO: Verificar se há keypoints suficientes após filtro
+    if np.sum(mask) < 4:
+        # Menos de 4 keypoints válidos - não dá para fazer transformação
+        # Retornar radar vazio
+        return np.zeros((CONFIG.width, CONFIG.length, 3), dtype=np.uint8)
+    
     try:
         transformer = ViewTransformer(
             source=keypoints.xy[0][mask].astype(np.float32),
@@ -396,70 +350,105 @@ def run_player_detection(source_video_path: str, device: str) -> Iterator[np.nda
 
 def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarray]:
     """
-    Run ball detection on a video and yield annotated frames.
-
+    Run ball detection with real-time interpolation using fixed-size buffer.
+    
+    This function implements a single-pass video processing approach with delayed output:
+    1. Read frame N → Detect ball → Store in buffer
+    2. When buffer is full: Interpolate gaps → Output oldest frame (N-30)
+    3. After loop: Flush remaining frames from buffer
+    
     Args:
         source_video_path (str): Path to the source video.
         device (str): Device to run the model on (e.g., 'cpu', 'cuda').
 
     Yields:
-        Iterator[np.ndarray]: Iterator over annotated frames.
+        Iterator[np.ndarray]: Iterator over annotated frames with interpolated ball positions.
     """
     ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    ball_tracker = BallTracker(buffer_size=20)
-    ball_annotator = BallAnnotator(radius=6, buffer_size=10)
+    
+    # 🎯 Real-time interpolator with fixed buffer (30 frames = ~1.2s @ 25fps)
+    interpolator = RealTimeBallInterpolator(buffer_size=30)
+    annotator = InterpolatedBallAnnotator(radius=8, trail_length=15)
 
     def callback(image_slice: np.ndarray) -> sv.Detections:
-        result = ball_detection_model(image_slice, imgsz=640, verbose=False)[0]
+        result = ball_detection_model(image_slice, imgsz=1024, conf=0.30, verbose=False)[0]
         return sv.Detections.from_ultralytics(result)
 
     slicer = sv.InferenceSlicer(
         callback=callback,
-        # overlap_filter_strategy=sv.OverlapFilter.NONE,
         slice_wh=(640, 640),
     )
 
+    # 📊 MAIN LOOP: Process frames and fill buffer
     for frame in frame_generator:
         detections = slicer(frame).with_nms(threshold=0.1)
         balls = detections[detections.class_id == BALL_CLASS_ID]
-        detections = ball_tracker.update(balls)
-        annotated_frame = frame.copy()
-        annotated_frame = ball_annotator.annotate(annotated_frame, detections)
-
+        
+        # 🎯 FILTER 1: Remove detections with very small area (noise/feet)
+        if len(balls) > 0:
+            areas = (balls.xyxy[:, 2] - balls.xyxy[:, 0]) * (balls.xyxy[:, 3] - balls.xyxy[:, 1])
+            min_area = 100  # Minimum ball area in 640x640 slice
+            balls = balls[areas >= min_area]
+        
+        # 🎯 FILTER 2: Keep only HIGHEST confidence detection (only 1 ball exists)
+        if len(balls) > 0:
+            best_idx = np.argmax(balls.confidence)
+            balls = balls[best_idx:best_idx+1]
+        
+        # ⏱️ Add frame to buffer (with interpolation logic)
+        buffered_frame = interpolator.add_frame(frame, balls)
+        
+        # 📤 OUTPUT: Only yield when buffer is full (delayed output with interpolation)
+        if buffered_frame is not None:
+            annotated_frame = annotator.annotate(buffered_frame.frame, buffered_frame)
+            yield annotated_frame
+    
+    # 🔚 FLUSH: Process remaining frames in buffer
+    for buffered_frame in interpolator.flush_buffer():
+        annotated_frame = annotator.annotate(buffered_frame.frame, buffered_frame)
         yield annotated_frame
 
 
 def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndarray]:
     """
-    Run player tracking on a video and yield annotated frames with tracked players.
+    Run player tracking using YOLO's native BoT-SORT tracker with GMC.
+    
+    BoT-SORT provides superior tracking for football videos through:
+    - Global Motion Compensation (GMC): Handles camera panning/zooming
+    - High track buffer (60 frames): Maintains IDs through occlusions
+    - ReID features: Re-identifies players after long disappearances
 
     Args:
         source_video_path (str): Path to the source video.
         device (str): Device to run the model on (e.g., 'cpu', 'cuda').
 
     Yields:
-        Iterator[np.ndarray]: Iterator over annotated frames.
+        Iterator[np.ndarray]: Iterator over annotated frames with tracked players.
     """
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    if TRACKER_CHOICE == 'norfair':
-        tracker = init_norfair_tracker()
-    else:
-        tracker = sv.ByteTrack(minimum_consecutive_frames=3)
+    
     for frame in frame_generator:
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(result)
-        # Update tracker: ByteTrack has update_with_detections; Norfair uses helper
-        if TRACKER_CHOICE == 'norfair' and NorfairTracker is not None:
-            # get ids aligned with detections
-            ids = norfair_update_and_get_ids(tracker, detections)
-            # attach tracker ids to detections object (fill with None where missing)
-            detections.tracker_id = ids
-        else:
-            detections = tracker.update_with_detections(detections)
-
-        labels = [str(tracker_id) for tracker_id in detections.tracker_id]
+        # 🎯 YOLO native tracking with BoT-SORT + GMC
+        results = player_detection_model.track(
+            frame,
+            imgsz=1280,
+            conf=0.1,  # Low threshold for tracker to catch everything
+            persist=True,  # CRITICAL: Maintain IDs across frames
+            tracker=BOTSORT_CONFIG_PATH,  # Custom BoT-SORT config with GMC
+            verbose=False
+        )
+        
+        # Extract detections with tracker IDs
+        detections = sv.Detections.from_ultralytics(results[0])
+        
+        # Filter out detections without tracker IDs (if any)
+        if detections.tracker_id is not None:
+            valid_mask = detections.tracker_id != -1  # -1 means no ID assigned
+            detections = detections[valid_mask]
+        
+        labels = [str(int(tid)) for tid in detections.tracker_id] if detections.tracker_id is not None else []
 
         annotated_frame = frame.copy()
         annotated_frame = ELLIPSE_ANNOTATOR.annotate(annotated_frame, detections)
@@ -468,13 +457,15 @@ def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndar
         yield annotated_frame
 
 
-def run_team_classification(source_video_path: str, device: str) -> Iterator[np.ndarray]:
+def run_team_classification(source_video_path: str, device: str, debug: bool = False, debug_output_dir: str = "debug_team_output") -> Iterator[np.ndarray]:
     """
     Run team classification on a video and yield annotated frames with team colors.
 
     Args:
         source_video_path (str): Path to the source video.
         device (str): Device to run the model on (e.g., 'cpu', 'cuda').
+        debug (bool): Enable debug mode to save visualization images.
+        debug_output_dir (str): Directory to save debug images.
 
     Yields:
         Iterator[np.ndarray]: Iterator over annotated frames.
@@ -482,45 +473,40 @@ def run_team_classification(source_video_path: str, device: str) -> Iterator[np.
     player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path, stride=STRIDE)
 
-    crops = []
-    # i = 0
-    # for frame in tqdm(frame_generator, desc='collecting crops'):
-    print('collecting crops')
-    for frame in frame_generator:
-        # print('collecting', i)
-        # i+= 1
-        # if i > 1:
-        #     print('breaking')
-        #     break
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(result)
-        crops += get_crops(frame, detections[detections.class_id == PLAYER_CLASS_ID])
-
-    print(f'Collected {len(crops)} crops for team classification')
-    team_classifier = safe_train_team_classifier(crops, device=device)
+    # 🎯 Initialize new TeamClassifier (with optional debug mode)
+    team_classifier = TeamClassifier(debug=debug, debug_output_dir=debug_output_dir)
+    print('✅ TeamClassifier initialized with voting system')
+    if debug:
+        print(f'🔬 DEBUG MODE: Images will be saved to {debug_output_dir}/')
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    if TRACKER_CHOICE == 'norfair':
-        tracker = init_norfair_tracker()
-    else:
-        tracker = sv.ByteTrack(minimum_consecutive_frames=3)
+    
     for frame in frame_generator:
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(result)
-        if TRACKER_CHOICE == 'norfair' and NorfairTracker is not None:
-            ids = norfair_update_and_get_ids(tracker, detections)
-            detections.tracker_id = ids
-        else:
-            detections = tracker.update_with_detections(detections)
+        # 🎯 YOLO native tracking with BoT-SORT + GMC
+        results = player_detection_model.track(
+            frame,
+            imgsz=1280,
+            conf=0.1,
+            persist=True,
+            tracker=BOTSORT_CONFIG_PATH,
+            verbose=False
+        )
+        
+        detections = sv.Detections.from_ultralytics(results[0])
+        
+        # Filter out detections without tracker IDs
+        if detections.tracker_id is not None:
+            valid_mask = detections.tracker_id != -1
+            detections = detections[valid_mask]
 
+        # 🎯 Assign teams using new system
         players = detections[detections.class_id == PLAYER_CLASS_ID]
-        crops = get_crops(frame, players)
-        players_team_id = team_classifier.predict(crops)
-        # normalize predictions: replace None with 0 and ensure integers
-        if players_team_id is None:
-            players_team_id = np.array([], dtype=int)
+        players = team_classifier.assign_team(frame, players)
+        
+        if hasattr(players, 'team_id') and players.team_id is not None:
+            players_team_id = players.team_id
         else:
-            players_team_id = np.array([0 if p is None else int(p) for p in players_team_id], dtype=int)
+            players_team_id = np.array([], dtype=int)
 
         goalkeepers = detections[detections.class_id == GOALKEEPER_CLASS_ID]
         goalkeepers_team_id = resolve_goalkeepers_team_id(players, players_team_id, goalkeepers)
@@ -530,8 +516,10 @@ def run_team_classification(source_video_path: str, device: str) -> Iterator[np.
         detections = sv.Detections.merge([players, goalkeepers, referees])
 
         # Team1 = 0; Team2 = 1; Goalkeeper = 2; Referee = 3
+        # Convert -1 (unclassified) to 4 (neutral color) to avoid negative index error
+        safe_players_team_id = np.where(players_team_id == -1, 4, players_team_id)
         color_lookup = np.array(
-                players_team_id.tolist() +
+                safe_players_team_id.tolist() +
                 # goalkeepers_team_id.tolist() +
                 [2] * len(goalkeepers) +  # goalkeeper color = 2
                 [REFEREE_CLASS_ID] * len(referees)
@@ -557,27 +545,11 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path, stride=STRIDE)
     performanceMeter('initializing models')
 
-    teamColorTrainingCrops = []
-    print('collecting crops to train')
-    # for frame in tqdm(frame_generator, desc='collecting crops'):
-    MAX_TRAIN_DETECTIONS = 200  # Aumentado de 100 para 200 (mais amostras = melhor separação)
-    for frame in frame_generator:
-        if len(teamColorTrainingCrops) > MAX_TRAIN_DETECTIONS:
-            print('reached', MAX_TRAIN_DETECTIONS, 'crops: stopping')
-            break
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(result)
-        detections = detections[detections.class_id == PLAYER_CLASS_ID]
-        detections = detections[detections.confidence > 0.75]  # Aumentado para melhor qualidade
-        teamColorTrainingCrops+= get_crops(frame, detections)
-
-    performanceMeter('collecting teamColorTrainingCrops from all frames')
+    # 🎯 Initialize new TeamClassifier (no pre-training needed)
+    team_classifier = TeamClassifier()  # Uses internal HISTORY_LENGTH=30
+    print('✅ TeamClassifier initialized with voting system')
     
-    # Use safe training with fallback to dummy classifier if not enough crops
-    print(f'Collected {len(teamColorTrainingCrops)} crops for team classification')
-    team_classifier = safe_train_team_classifier(teamColorTrainingCrops, device=device)
-    
-    performanceMeter('training team recognition model')
+    performanceMeter('initializing team classifier')
 
     ## store all teamIds for each tracker Id
     # frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
@@ -605,26 +577,30 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
 
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    if TRACKER_CHOICE == 'norfair':
-        tracker = init_norfair_tracker()
-    else:
-        tracker = sv.ByteTrack(minimum_consecutive_frames=3)
-    # smoother = sv.DetectionsSmoother(length=3)
-
-
-
-    # ball detector
+    
+    # 🎯 Ball detector with real-time interpolation (usando InferenceSlicer como no modo BALL_DETECTION)
     ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
-    ball_tracker = BallTracker(buffer_size=50)  # Aumentado para mais histórico
-    ball_annotator = BallAnnotator(radius=8, buffer_size=15)  # Aumentado para melhor visualização
-    # end of ball detector
-
-    insideTrackerIds_Team = {}
+    ball_interpolator = RealTimeBallInterpolator(buffer_size=30)  # 30 frames = ~1.2s delay @ 25fps
+    ball_annotator = InterpolatedBallAnnotator(radius=8, trail_length=15)
+    
+    # 🎯 InferenceSlicer para detetar bolas pequenas (igual ao modo BALL_DETECTION)
+    def ball_slicer_callback(image_slice: np.ndarray) -> sv.Detections:
+        result = ball_detection_model(image_slice, imgsz=1024, conf=0.30, verbose=False)[0]
+        return sv.Detections.from_ultralytics(result)
+    
+    ball_slicer = sv.InferenceSlicer(
+        callback=ball_slicer_callback,
+        slice_wh=(640, 640),
+    )
 
     last_keypoints = None
     last_detections = None
     
     frame_counter = 0
+    
+    # 🎯 Buffer de dados para sincronização (players, keypoints, etc)
+    # Como a bola tem delay de 30 frames, precisamos armazenar os outros dados também
+    sync_buffer = deque(maxlen=30)
 
     for frame in frame_generator:
         # print('        new frame')
@@ -646,16 +622,23 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
             # Fallback: create empty keypoints structure
             keypoints = sv.KeyPoints(xy=np.empty((1, 0, 2)))
         
-        result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
-        originalDetections = sv.Detections.from_ultralytics(result)
+        # 🎯 YOLO native tracking with BoT-SORT + GMC for players
+        # imgsz=1280 para manter consistência com TEAM_CLASSIFICATION (tracker IDs estáveis)
+        results = player_detection_model.track(
+            frame,
+            imgsz=1280,
+            conf=0.1,  # Low threshold for tracker
+            persist=True,  # Maintain IDs
+            tracker=BOTSORT_CONFIG_PATH,
+            verbose=False
+        )
         
-        # Update tracker based on choice
-        if TRACKER_CHOICE == 'norfair' and NorfairTracker is not None and tracker is not None:
-            ids = norfair_update_and_get_ids(tracker, originalDetections)
-            detections = originalDetections
-            detections.tracker_id = np.array(ids) if ids else np.array([])
-        else:
-            detections = tracker.update_with_detections(originalDetections)
+        detections = sv.Detections.from_ultralytics(results[0])
+        
+        # Filter out detections without tracker IDs
+        if detections.tracker_id is not None:
+            valid_mask = detections.tracker_id != -1
+            detections = detections[valid_mask]
 
         if last_detections is None:  # first frame
             last_detections = detections
@@ -685,130 +668,274 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
         # detections = smoother.update_with_detections(detections)
         performanceMeter('getting Player and Pitch detections')
         
+        # 🎯 NEW: Assign teams APENAS a Players (class_id == 2)
         players = detections[detections.class_id == PLAYER_CLASS_ID]
-        crops = get_crops(frame, players)
-        players_team_id = team_classifier.predict(crops)
-        # normalize predictions: replace None with 0 and ensure integers
-        if players_team_id is None:
+        players = team_classifier.assign_team(frame, players)
+        
+        # Extract team_id from players (deve ser APENAS 0 ou 1, nunca -1)
+        if hasattr(players, 'team_id') and players.team_id is not None:
+            players_team_id = players.team_id
+            # Force: Se algum player ainda tiver -1, converte para 0 (fallback)
+            players_team_id = np.where(players_team_id == -1, 0, players_team_id)
+        else:
+            # Fallback: no teams detected
             players_team_id = np.array([], dtype=int)
-        else:
-            players_team_id = np.array([0 if p is None else int(p) for p in players_team_id], dtype=int)
+        
+        # 🔍 DEBUG: Log team assignments
+        if frame_counter % 50 == 0:
+            print(f"\n📊 Frame {frame_counter} - Team Classification:")
+            print(f"   Players: {len(players)}")
+            if players.tracker_id is not None and len(players.tracker_id) > 0:
+                print(f"   Tracker IDs (first 5): {players.tracker_id[:min(5, len(players.tracker_id))]}")
+            if len(players_team_id) > 0:
+                print(f"   Team IDs (first 5): {players_team_id[:min(5, len(players_team_id))]}")
+                team0_count = np.sum(players_team_id == 0)
+                team1_count = np.sum(players_team_id == 1)
+                print(f"   🔴 Team 0 (RED): {team0_count} players")
+                print(f"   🔵 Team 1 (BLUE): {team1_count} players")
 
-        # FIX players team ID - use temporal smoothing with tracker history
-        if players.tracker_id is not None and len(players.tracker_id) > 0:
-            for i in range(min(len(players.tracker_id), len(players_team_id))):
-                if players.tracker_id[i] is not None:
-                    tracker_id_str = str(players.tracker_id[i])
-                    if tracker_id_str not in insideTrackerIds_Team:
-                        insideTrackerIds_Team[tracker_id_str] = []
-                    insideTrackerIds_Team[tracker_id_str].append(int(players_team_id[i]))
-
-        # use teamId from the last 75 frames (3 sec) classifications of insideTrackerIds_Team
-        smoothed_team_ids = []
-        if players.tracker_id is not None and len(players.tracker_id) > 0:
-            for tracker_id in players.tracker_id:
-                if tracker_id is not None:
-                    tracker_id_str = str(tracker_id)
-                    if tracker_id_str in insideTrackerIds_Team and len(insideTrackerIds_Team[tracker_id_str]) > 0:
-                        # Use mode (most common) instead of mean for more stable classification
-                        recent_ids = insideTrackerIds_Team[tracker_id_str][-75:]
-                        smoothed_id = max(set(recent_ids), key=recent_ids.count)
-                        smoothed_team_ids.append(smoothed_id)
-                    else:
-                        smoothed_team_ids.append(0)
-                else:
-                    smoothed_team_ids.append(0)
-        else:
-            # No tracker IDs, use raw predictions
-            smoothed_team_ids = players_team_id.tolist() if len(players_team_id) > 0 else []
-
-        players_team_id = np.array(smoothed_team_ids, dtype=int) if len(smoothed_team_ids) > 0 else np.array([], dtype=int)
-        # END OF FIX players team ID
-
-        # print('players_team_id', players_team_id)
-
-        performanceMeter('predicting player Teams')
+        performanceMeter('assigning player teams with voting')
 
         goalkeepers = detections[detections.class_id == GOALKEEPER_CLASS_ID]
         # goalkeepers_team_id = resolve_goalkeepers_team_id(players, players_team_id, goalkeepers)
         referees = detections[detections.class_id == REFEREE_CLASS_ID]
-        # use the dedicated ball detection model per frame (single-class ball model)
-        # Model trained with imgsz=1280, using very low conf for better recall (especially for ball in air)
-        # Using agnostic_nms to avoid suppressing multiple ball detections
-        ball_result = ball_detection_model(
-            frame, 
-            imgsz=1280, 
-            conf=0.05,          # Muito baixo para pegar bola no ar
-            iou=0.3,            # IoU baixo para não suprimir detecções próximas
-            agnostic_nms=True,  # NMS independente de classe
-            max_det=10,         # Permite múltiplas detecções
-            verbose=False
-        )[0]
-        balls = sv.Detections.from_ultralytics(ball_result)
-        performanceMeter('filtering detections')
+        
+        # 🎯 Ball detection usando InferenceSlicer (igual ao modo BALL_DETECTION)
+        # Divide a imagem em slices 640x640 para detetar bolas pequenas
+        balls = ball_slicer(frame).with_nms(threshold=0.1)
+        balls = balls[balls.class_id == BALL_CLASS_ID] if len(balls) > 0 else balls
+        
+        # 🎯 FILTER 1: Remove detections with very small area (noise/feet)
+        if len(balls) > 0:
+            areas = (balls.xyxy[:, 2] - balls.xyxy[:, 0]) * (balls.xyxy[:, 3] - balls.xyxy[:, 1])
+            min_area = 100  # Bola mínima: ~10x10 pixels (igual ao modo BALL_DETECTION)
+            balls = balls[areas >= min_area]
+        
+        # 🎯 FILTER 2: Keep only the HIGHEST confidence detection (only 1 ball exists)
+        if len(balls) > 0:
+            best_idx = np.argmax(balls.confidence)
+            balls = balls[best_idx:best_idx+1]  # Keep only the best one
+        performanceMeter('ball detection with slicer')
 
-        ballAnnotations = ball_tracker.update(balls)
-        performanceMeter('update Ball tracker')
-
-        # print('players', players)
-        # print('balls', balls)
-
-        detections = sv.Detections.merge([players, goalkeepers, referees])
-        performanceMeter('merging detections')
-
-        # Team1 = 0; Team2 = 1; Goalkeeper = 2; Referee = 3
-        color_lookup = np.array(
-            players_team_id.tolist() +
-            # goalkeepers_team_id.tolist() +
-            [2] * len(goalkeepers) +  # goalkeeper color = 2
-            [REFEREE_CLASS_ID] * len(referees)
-            # [4] * len(balls)
-        )
-        # Create labels, handling None tracker_id gracefully
+        # ⏱️ BUFFER STRATEGY: Store frame + all data, process with delay
+        detections_merged = sv.Detections.merge([players, goalkeepers, referees])
+        
+        # Merge team_id arrays: players (0/1) + goalkeepers (-1) + referees (-1)
+        merged_team_ids = np.concatenate([
+            players_team_id,
+            np.full(len(goalkeepers), -1, dtype=int),
+            np.full(len(referees), -1, dtype=int)
+        ])
+        
+        # Color lookup based on team_id:
+        # Team 0 → 0 (Red)
+        # Team 1 → 1 (Blue)
+        # GK (team_id=-1, class_id=1) → 2 (Orange)
+        # Referee (team_id=-1, class_id=3) → 3 (Yellow)
+        color_lookup = []
+        for i in range(len(detections_merged)):
+            team_id = merged_team_ids[i]
+            if team_id != -1:
+                # Has valid team (0 or 1) → Use team color
+                color_lookup.append(team_id)
+            else:
+                # Neutral (-1) → Determine by class_id
+                class_id = detections_merged.class_id[i]
+                if class_id == 1:  # Goalkeeper
+                    color_lookup.append(2)
+                elif class_id == 3:  # Referee
+                    color_lookup.append(3)
+                else:
+                    color_lookup.append(0)  # Fallback
+        
+        color_lookup = np.array(color_lookup)
+        
+        # 🏷️ NEW LABEL LOGIC: Hierarchy based on team_id
+        # 1. If team_id != -1 → Show team name (ignore class_id completely)
+        # 2. If team_id == -1 → Check class_id (GK or REF)
         labels = []
-        if detections.tracker_id is not None:
-            labels = [str(tid) if tid is not None else "?" for tid in detections.tracker_id]
+        if detections_merged.tracker_id is not None:
+            for i, tid in enumerate(detections_merged.tracker_id):
+                if tid is not None:
+                    team_id = merged_team_ids[i]
+                    
+                    # PRIORITY 1: Has team assignment (0 or 1)
+                    if team_id != -1:
+                        team_name = "T0" if team_id == 0 else "T1"
+                        labels.append(f"{tid} ({team_name})")
+                    
+                    # PRIORITY 2: No team (-1) → Use class_id
+                    else:
+                        class_id = detections_merged.class_id[i]
+                        if class_id == 1:  # Goalkeeper
+                            labels.append(f"{tid} (GK)")
+                        elif class_id == 3:  # Referee
+                            labels.append(f"{tid} (REF)")
+                        else:
+                            labels.append(f"{tid}")
+                else:
+                    labels.append("?")
         else:
-            labels = ["?"] * len(detections)
-
-        # print('detections', detections)
-        performanceMeter('creating colors and labels from detections')
-
-        annotated_frame = frame.copy()
-        annotated_frame = ELLIPSE_ANNOTATOR.annotate(annotated_frame, detections, custom_color_lookup=color_lookup)
-        annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(annotated_frame, detections, labels, custom_color_lookup=color_lookup)
-        annotated_frame = ball_annotator.annotate(annotated_frame, ballAnnotations)
-        performanceMeter('annotating frame with Elipse, and Ball')
-
-        startT = time.perf_counter()
-        RADAR_SCALE = 4
-        h, w, _ = frame.shape
-        radar = render_radar(detections, balls, keypoints, color_lookup)
-        if len(radar) > 0:
-            radar = sv.resize_image(radar, (w // RADAR_SCALE, h // RADAR_SCALE))
-            radar_h, radar_w, _ = radar.shape
-            rect = sv.Rect(
-                x=w // 2 - radar_w // 2,
-                y=h - radar_h,
-                width=radar_w,
-                height=radar_h
+            labels = ["?"] * len(detections_merged)
+        
+        # Store current frame data in sync buffer
+        sync_buffer.append({
+            'frame': frame.copy(),
+            'detections': detections_merged,
+            'color_lookup': color_lookup,
+            'labels': labels,
+            'keypoints': keypoints,
+            'frame_counter': frame_counter
+        })
+        
+        # 🎯 Add ball detection to interpolator (triggers interpolation)
+        buffered_ball = ball_interpolator.add_frame(frame, balls)
+        
+        # 📤 OUTPUT: Only when buffer is full (delayed render with interpolated ball)
+        if buffered_ball is not None and len(sync_buffer) == 30:
+            # Get oldest frame data (synchronized with interpolated ball)
+            oldest_data = sync_buffer[0]  # Don't pop yet, deque handles it automatically
+            
+            # Render frame with interpolated ball
+            annotated_frame = oldest_data['frame'].copy()
+            annotated_frame = ELLIPSE_ANNOTATOR.annotate(
+                annotated_frame, 
+                oldest_data['detections'], 
+                custom_color_lookup=oldest_data['color_lookup']
             )
-            annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
+            annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
+                annotated_frame, 
+                oldest_data['detections'], 
+                oldest_data['labels'], 
+                custom_color_lookup=oldest_data['color_lookup']
+            )
+            
+            # Annotate with interpolated ball
+            annotated_frame = ball_annotator.annotate(annotated_frame, buffered_ball)
+            
+            # 📊 Display ball confidence in top white area
+            if buffered_ball.detection is not None and buffered_ball.confidence > 0:
+                ball_conf = buffered_ball.confidence
+                conf_text = f"Ball Confidence: {ball_conf:.2%}"
+                
+                # Get frame dimensions
+                h, w = annotated_frame.shape[:2]
+                
+                # Text properties
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.8
+                thickness = 2
+                
+                # Get text size for background
+                (text_w, text_h), baseline = cv2.getTextSize(conf_text, font, font_scale, thickness)
+                
+                # Position: top-right corner with padding
+                padding = 15
+                text_x = w - text_w - padding
+                text_y = padding + text_h
+                
+                # Draw semi-transparent background
+                overlay = annotated_frame.copy()
+                cv2.rectangle(overlay, 
+                            (text_x - 10, text_y - text_h - 5), 
+                            (text_x + text_w + 10, text_y + baseline + 5), 
+                            (255, 255, 255), 
+                            -1)
+                annotated_frame = cv2.addWeighted(overlay, 0.6, annotated_frame, 0.4, 0)
+                
+                # Draw text (color based on confidence)
+                color = (0, 255, 0) if ball_conf > 0.5 else (0, 165, 255)  # Green if >50%, Orange otherwise
+                cv2.putText(annotated_frame, conf_text, 
+                          (text_x, text_y), 
+                          font, font_scale, color, thickness, cv2.LINE_AA)
+            
+            performanceMeter('annotating frame with Elipse, and Ball')
 
-        performanceMeter('rendering Radar in frame')
-        
-        # Print detailed timing every 30 frames
-        total_frame_time = time.perf_counter() - frameStartT
-        if frame_counter % 30 == 0:
-            print(f'\n=== Frame {frame_counter} Performance ===')
-            print(f'Total frame time: {total_frame_time*1000:.1f}ms ({1/total_frame_time:.1f} FPS)')
-            for desc, t in performance_times.items():
-                print(f'  {desc}: {t*1000:.1f}ms')
-        
-        yield annotated_frame
+            # Render radar with interpolated ball
+            startT = time.perf_counter()
+            RADAR_SCALE = 4
+            h, w, _ = annotated_frame.shape
+            
+            # Convert buffered ball to sv.Detections for radar rendering
+            ball_for_radar = ball_interpolator.get_detection_as_sv_detections(buffered_ball)
+            radar = render_radar(
+                oldest_data['detections'], 
+                ball_for_radar, 
+                oldest_data['keypoints'], 
+                oldest_data['color_lookup']
+            )
+            
+            if len(radar) > 0:
+                radar = sv.resize_image(radar, (w // RADAR_SCALE, h // RADAR_SCALE))
+                radar_h, radar_w, _ = radar.shape
+                rect = sv.Rect(
+                    x=w // 2 - radar_w // 2,
+                    y=h - radar_h,
+                    width=radar_w,
+                    height=radar_h
+                )
+                annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
+
+            performanceMeter('rendering Radar in frame')
+            
+            # Print detailed timing every 30 frames
+            total_frame_time = time.perf_counter() - frameStartT
+            if oldest_data['frame_counter'] % 30 == 0:
+                print(f'\n=== Frame {oldest_data["frame_counter"]} Performance (delayed output) ===')
+                print(f'Total frame time: {total_frame_time*1000:.1f}ms ({1/total_frame_time:.1f} FPS)')
+                for desc, t in performance_times.items():
+                    print(f'  {desc}: {t*1000:.1f}ms')
+            
+            yield annotated_frame
+    
+    # 🔚 FLUSH: Process remaining frames in buffer after loop ends
+    print(f"\n🔚 Flushing {len(ball_interpolator.buffer)} remaining frames from buffer...")
+    remaining_balls = ball_interpolator.flush_buffer()
+    
+    for i, buffered_ball in enumerate(remaining_balls):
+        if i < len(sync_buffer):
+            oldest_data = sync_buffer[i]
+            
+            annotated_frame = oldest_data['frame'].copy()
+            annotated_frame = ELLIPSE_ANNOTATOR.annotate(
+                annotated_frame, 
+                oldest_data['detections'], 
+                custom_color_lookup=oldest_data['color_lookup']
+            )
+            annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(
+                annotated_frame, 
+                oldest_data['detections'], 
+                oldest_data['labels'], 
+                custom_color_lookup=oldest_data['color_lookup']
+            )
+            annotated_frame = ball_annotator.annotate(annotated_frame, buffered_ball)
+            
+            # Render radar
+            RADAR_SCALE = 4
+            h, w, _ = annotated_frame.shape
+            ball_for_radar = ball_interpolator.get_detection_as_sv_detections(buffered_ball)
+            radar = render_radar(
+                oldest_data['detections'], 
+                ball_for_radar, 
+                oldest_data['keypoints'], 
+                oldest_data['color_lookup']
+            )
+            
+            if len(radar) > 0:
+                radar = sv.resize_image(radar, (w // RADAR_SCALE, h // RADAR_SCALE))
+                radar_h, radar_w, _ = radar.shape
+                rect = sv.Rect(
+                    x=w // 2 - radar_w // 2,
+                    y=h - radar_h,
+                    width=radar_w,
+                    height=radar_h
+                )
+                annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
+            
+            yield annotated_frame
 
 
-def main(source_video_path: str, target_video_path: str, device: str, mode: Mode) -> None:
+def main(source_video_path: str, target_video_path: str, device: str, mode: Mode, debug: bool = False, debug_output_dir: str = "debug_team_output") -> None:
     print('main')
 
     if mode == Mode.PITCH_DETECTION:
@@ -820,7 +947,7 @@ def main(source_video_path: str, target_video_path: str, device: str, mode: Mode
     elif mode == Mode.PLAYER_TRACKING:
         frame_generator = run_player_tracking(source_video_path=source_video_path, device=device)
     elif mode == Mode.TEAM_CLASSIFICATION:
-        frame_generator = run_team_classification(source_video_path=source_video_path, device=device)
+        frame_generator = run_team_classification(source_video_path=source_video_path, device=device, debug=debug, debug_output_dir=debug_output_dir)
     elif mode == Mode.RADAR:
         frame_generator = run_radar(source_video_path=source_video_path, device=device)
     else:
@@ -916,18 +1043,17 @@ def main(source_video_path: str, target_video_path: str, device: str, mode: Mode
             print(f'\nProcessed {frame_count}/{video_info.total_frames} frames total (no display available)')
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--source_video_path', type=str, required=True)
-    parser.add_argument('--target_video_path', type=str, required=False)
-    parser.add_argument('--device', type=str, default='cuda')   # cpu || cuda
-    parser.add_argument('--mode', type=Mode, default=Mode.RADAR)
-    parser.add_argument('--tracker', type=str, default='bytetrack', choices=['bytetrack', 'norfair'], help='Tracker backend to use')
+    parser = argparse.ArgumentParser(description='Football Player Detection with BoT-SORT Tracking (GMC enabled)')
+    parser.add_argument('--source_video_path', type=str, required=True, help='Path to input video or directory')
+    parser.add_argument('--target_video_path', type=str, required=False, help='Path to save output video (optional)')
+    parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to run inference on')
+    parser.add_argument('--mode', type=Mode, default=Mode.RADAR, help='Processing mode')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
+    parser.add_argument('--debug_output_dir', type=str, default='debug_team_output', help='Directory for debug images')
     args = parser.parse_args()
 
+    print('🎯 Football Analysis System - BoT-SORT with GMC')
     print('args', args)
-
-    # global selection of tracker backend
-    TRACKER_CHOICE = args.tracker
 
     if os.path.isdir(args.source_video_path):
         # if args.target_video_path is None:
@@ -955,7 +1081,9 @@ if __name__ == '__main__':
                     source_video_path=sourcePath,
                     target_video_path=targetPath,
                     device=args.device,
-                    mode=args.mode
+                    mode=args.mode,
+                    debug=args.debug,
+                    debug_output_dir=args.debug_output_dir
                 )
             except Exception as err:
                 print('Error', err)
@@ -968,6 +1096,8 @@ if __name__ == '__main__':
             source_video_path=args.source_video_path,
             target_video_path=args.target_video_path,
             device=args.device,
-            mode=args.mode
+            mode=args.mode,
+            debug=args.debug,
+            debug_output_dir=args.debug_output_dir
         )
         
