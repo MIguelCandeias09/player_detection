@@ -1,0 +1,56 @@
+# =============================================================================
+# FootAR .gitignore — Updated for new src/ architecture
+# =============================================================================
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# --- OS artifacts ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE ---
+.idea/
+
+# --- Large binary data (use Git LFS or DVC for these) ---
+
+# Model weights
+models/**/*.pt
+training/**/*.pt
+
+# Video files
+videos/
+*.mp4
+*.avi
+*.mov
+
+# Training datasets (large image sets)
+training/datasets/
+
+# Training run outputs (checkpoints, logs)
+training/notebooks/runs/
+
+# --- Project legacy (to be cleaned up after migration) ---
+/roboflow_sports_footar/datasets_and_models/
+/datasets_and_models/
+/OriginalVideosUncut/
+/roboflow_sports_footar/venv/
+/roboflow_sports_footar/videos/
+/roboflow_sports_footar/notebooks/datasets/
+/roboflow_sports_footar/notebooks/runs/
+/roboflow_sports_footar/runs/
+/roboflow_sports_footar/data/*.pt
+
+# --- Temporary ---
+*.tmp
+*.bak
+debug_team_output/

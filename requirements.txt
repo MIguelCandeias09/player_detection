@@ -1,0 +1,25 @@
+# FootAR — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core ML / Inference
+ultralytics>=8.1.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer Vision
+opencv-python>=4.8.0
+supervision>=0.18.0
+
+# Data & Clustering
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Dimensionality Reduction (team classification pipeline)
+umap-learn>=0.5.4
+
+# Visualization
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# Utilities
+gdown>=4.7.0
