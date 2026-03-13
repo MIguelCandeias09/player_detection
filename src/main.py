@@ -37,16 +37,16 @@ PROJECT_ROOT = os.path.dirname(PARENT_DIR)  # One level up from src/
 
 # BoT-SORT Tracker Configuration (with GMC for camera motion compensation)
 BOTSORT_CONFIG_PATH = os.path.join(PROJECT_ROOT, 'configs', 'futebol_botsort.yaml')
-# 🧪 TESTING: Using old company model (football-player-detection_mike.pt) to compare output
-PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'yolo12m_jogadores_bola.pt')
-# PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'yolo12m_jogadores_bola.pt')  # combined model with ball
-# PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'player_y12l_footar_best.pt')  # old separate model
+BALL_BOTSORT_FAST_CONFIG_PATH = os.path.join(PROJECT_ROOT, 'configs', 'futebol_botsort_fast.yaml')
+# Use the unified player+ball model for both tasks
+PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'yolo12l_jogadores_bola_1.pt')
+# PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'football-player-detection_mike.pt')  # old model
 # PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'football-pitch-detection-mike_1280.pt')
 PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'pitch_v11m_640_footar_best.pt')  # Modelo anterior (mais estável)
 # PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'pitch_y11x_keypoint_best.pt')  # YOLOv11x-pose 32-keypoint (65.8% mAP50) - PRECISA MELHORIAS
-# Ball model - use combined model OR separate ball model for BALL_DETECTION mode
-BALL_DETECTION_MODEL_PATH = PLAYER_DETECTION_MODEL_PATH  # Uses same model when combined (yolo12m_jogadores_bola)
-# BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'ball_y11m_footar_best.pt')  # separate ball model
+# Keep ball path equal to player path (same unified model)
+BALL_DETECTION_MODEL_PATH = PLAYER_DETECTION_MODEL_PATH
+# BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'ball_y12s_optimized_best.pt')  # previous version
 
 BALL_CLASS_ID = 0
 GOALKEEPER_CLASS_ID = 1
@@ -492,14 +492,9 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
             verbose=False
         )
         
-        detections_all = sv.Detections.from_ultralytics(results[0])
-
-        # 🚀 Extract ball BEFORE tracker filtering so valid ball detections are not discarded
-        balls = detections_all[detections_all.class_id == BALL_CLASS_ID] if len(detections_all) > 0 else sv.Detections.empty()
-
-        detections = detections_all
-
-        # Filter out detections without tracker IDs for tracked entities (players/GK/ref)
+        detections = sv.Detections.from_ultralytics(results[0])
+        
+        # Filter out detections without tracker IDs
         if detections.tracker_id is not None:
             valid_mask = detections.tracker_id != -1
             detections = detections[valid_mask]
@@ -538,7 +533,16 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
         yield annotated_frame
 
 
-def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
+def run_radar(
+    source_video_path: str,
+    device: str,
+    player_track_imgsz: int = 1120,
+    pitch_every_n_frames: int = 2,
+    ball_track_imgsz: int = 960,
+    ball_track_every_n_frames: int = 1,
+    ball_track_conf: float = 0.25,
+    ball_max_hold_frames: int = 3,
+) -> Iterator[np.ndarray]:
     print('run_radar')
     performanceMeter()
 
@@ -583,13 +587,15 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
-    # 🚀 Ball interpolation
+    pitch_every_n_frames = max(1, int(pitch_every_n_frames))
+    ball_max_hold_frames = max(0, int(ball_max_hold_frames))
+    last_balls = sv.Detections.empty()
+    ball_miss_streak = 0
     ball_interpolator = RealTimeBallInterpolator(buffer_size=30)  # 30 frames = ~1.2s delay @ 25fps
     ball_annotator = InterpolatedBallAnnotator(radius=8, trail_length=15)
 
     last_keypoints = None
     last_detections = None
-    pitch_every_n_frames = 2
     
     frame_counter = 0
     
@@ -603,51 +609,56 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
         performanceMeter()
         frame_counter += 1
 
+        # 🎯 Pitch detection só a cada N frames (reutiliza os últimos keypoints)
         should_run_pitch = (frame_counter % pitch_every_n_frames == 0) or (last_keypoints is None)
         if should_run_pitch:
             result = pitch_detection_model(frame, verbose=False)[0]
-
-            # Try to extract keypoints, create empty if model doesn't support it
             try:
-                # Check if result has keypoints attribute and it's not None
                 if hasattr(result, 'keypoints') and result.keypoints is not None and hasattr(result.keypoints, 'xy'):
                     keypoints = sv.KeyPoints.from_ultralytics(result)
                 else:
-                    # Create empty keypoints if model doesn't support pose detection
                     keypoints = sv.KeyPoints(xy=np.empty((1, 0, 2)))
             except (AttributeError, TypeError, Exception):
-                # Fallback: create empty keypoints structure
                 keypoints = sv.KeyPoints(xy=np.empty((1, 0, 2)))
         else:
             keypoints = last_keypoints
         
-        # 🎯 YOLO native tracking with BoT-SORT + GMC for players
-        # imgsz=1280 para manter consistência com TEAM_CLASSIFICATION (tracker IDs estáveis)
+        # 🎯 1. UMA ÚNICA INFERÊNCIA PARA TUDO!
+        # Usamos player_track_imgsz para garantir que a bola não desaparece
         results = player_detection_model.track(
             frame,
-            imgsz=1280,
-            conf=0.1,  # Low threshold for tracker
-            persist=True,  # Maintain IDs
+            imgsz=player_track_imgsz,
+            conf=0.15,
+            persist=True,
             tracker=BOTSORT_CONFIG_PATH,
             verbose=False
         )
-        
+
+        # Extrai TODAS as deteções (Jogadores, Guarda-redes, Árbitros e BOLA)
         detections_all = sv.Detections.from_ultralytics(results[0])
-        balls = detections_all[detections_all.class_id == BALL_CLASS_ID] if len(detections_all) > 0 else sv.Detections.empty()
-        detections = detections_all[detections_all.class_id != BALL_CLASS_ID] if len(detections_all) > 0 else sv.Detections.empty()
 
-        # Filter out detections without tracker IDs for tracked entities
-        if detections.tracker_id is not None:
-            valid_mask = detections.tracker_id != -1
-            detections = detections[valid_mask]
+        # Filtra IDs inválidos
+        if detections_all.tracker_id is not None:
+            valid_mask = detections_all.tracker_id != -1
+            detections_all = detections_all[valid_mask]
 
-        if last_detections is None:  # first frame
-            last_detections = detections
+        if last_detections is None:
+            last_detections = detections_all
         else:
-            if len(detections) == 0:
-                detections = last_detections
+            if len(detections_all) == 0:
+                detections_all = last_detections
             else:
-                last_detections = detections
+                last_detections = detections_all
+
+        performanceMeter('getting Unified Detections')
+
+        # 🎯 2. SEPARAR AS CLASSES POR CÓDIGO (Custo: 0 ms)
+        players = detections_all[detections_all.class_id == PLAYER_CLASS_ID]
+        goalkeepers = detections_all[detections_all.class_id == GOALKEEPER_CLASS_ID]
+        referees = detections_all[detections_all.class_id == REFEREE_CLASS_ID]
+
+        # A bola vem da inferência unificada
+        balls = detections_all[detections_all.class_id == BALL_CLASS_ID]
 
         if last_keypoints is None:  # first frame
             last_keypoints = keypoints
@@ -666,11 +677,7 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
         # print('keypoints', keypoints)
 
 
-        # detections = smoother.update_with_detections(detections)
-        performanceMeter('getting Player and Pitch detections')
-        
-        # 🎯 NEW: Assign teams APENAS a Players (class_id == 2)
-        players = detections[detections.class_id == PLAYER_CLASS_ID]
+        # 🎯 3. LÓGICA DAS EQUIPAS (mantém-se igual)
         players = team_classifier.assign_team(frame, players)
         
         # Extract team_id from players (deve ser APENAS 0 ou 1, nunca -1)
@@ -697,20 +704,28 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
 
         performanceMeter('assigning player teams with voting')
 
-        goalkeepers = detections[detections.class_id == GOALKEEPER_CLASS_ID]
-        # goalkeepers_team_id = resolve_goalkeepers_team_id(players, players_team_id, goalkeepers)
-        referees = detections[detections.class_id == REFEREE_CLASS_ID]
-
-        # 🎯 FILTER 1: Remove detections with very small area (noise/feet)
+        # 🎯 4. FILTROS DA BOLA (sem tracking novo)
         if len(balls) > 0:
             areas = (balls.xyxy[:, 2] - balls.xyxy[:, 0]) * (balls.xyxy[:, 3] - balls.xyxy[:, 1])
-            min_area = 100  # Bola mínima: ~10x10 pixels
+            min_area = 50
             balls = balls[areas >= min_area]
-        
-        # 🎯 FILTER 2: Keep only the HIGHEST confidence detection (only 1 ball exists)
+
         if len(balls) > 0:
             best_idx = np.argmax(balls.confidence)
-            balls = balls[best_idx:best_idx+1]  # Keep only the best one
+            balls = balls[best_idx:best_idx+1]
+
+        # Anti-flicker da bola
+        if len(balls) > 0:
+            last_balls = balls
+            ball_miss_streak = 0
+        else:
+            ball_miss_streak += 1
+            if ball_miss_streak <= ball_max_hold_frames and len(last_balls) > 0:
+                balls = last_balls
+            else:
+                last_balls = sv.Detections.empty()
+                balls = last_balls
+
         performanceMeter('ball extraction (single unified inference)')
 
         # ⏱️ BUFFER STRATEGY: Store frame + all data, process with delay
@@ -931,7 +946,20 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
             yield annotated_frame
 
 
-def main(source_video_path: str, target_video_path: str, device: str, mode: Mode, debug: bool = False, debug_output_dir: str = "debug_team_output") -> None:
+def main(
+    source_video_path: str,
+    target_video_path: str,
+    device: str,
+    mode: Mode,
+    debug: bool = False,
+    debug_output_dir: str = "debug_team_output",
+    player_track_imgsz: int = 1120,
+    pitch_every_n_frames: int = 2,
+    ball_track_imgsz: int = 960,
+    ball_track_every_n_frames: int = 1,
+    ball_track_conf: float = 0.25,
+    ball_max_hold_frames: int = 3,
+) -> None:
     print('main')
 
     if mode == Mode.PITCH_DETECTION:
@@ -945,7 +973,16 @@ def main(source_video_path: str, target_video_path: str, device: str, mode: Mode
     elif mode == Mode.TEAM_CLASSIFICATION:
         frame_generator = run_team_classification(source_video_path=source_video_path, device=device, debug=debug, debug_output_dir=debug_output_dir)
     elif mode == Mode.RADAR:
-        frame_generator = run_radar(source_video_path=source_video_path, device=device)
+        frame_generator = run_radar(
+            source_video_path=source_video_path,
+            device=device,
+            player_track_imgsz=player_track_imgsz,
+            pitch_every_n_frames=pitch_every_n_frames,
+            ball_track_imgsz=ball_track_imgsz,
+            ball_track_every_n_frames=ball_track_every_n_frames,
+            ball_track_conf=ball_track_conf,
+            ball_max_hold_frames=ball_max_hold_frames,
+        )
     else:
         raise NotImplementedError(f"Mode {mode} is not implemented.")
 
@@ -1072,6 +1109,12 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=Mode, default=Mode.RADAR, help='Processing mode')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
     parser.add_argument('--debug_output_dir', type=str, default='debug_team_output', help='Directory for debug images')
+    parser.add_argument('--player_track_imgsz', type=int, default=1120, help='Player tracking image size for RADAR mode')
+    parser.add_argument('--pitch_every_n_frames', type=int, default=2, help='Run pitch detection every N frames (RADAR mode)')
+    parser.add_argument('--ball_track_imgsz', type=int, default=960, help='Ball tracking image size for RADAR mode')
+    parser.add_argument('--ball_track_every_n_frames', type=int, default=1, help='Run ball tracking every N frames (RADAR mode)')
+    parser.add_argument('--ball_track_conf', type=float, default=0.25, help='Ball tracking confidence threshold (RADAR mode)')
+    parser.add_argument('--ball_max_hold_frames', type=int, default=3, help='Keep last ball detection for N miss frames (RADAR mode)')
     args = parser.parse_args()
 
     print('🎯 Football Analysis System - BoT-SORT with GMC')
@@ -1105,7 +1148,13 @@ if __name__ == '__main__':
                     device=args.device,
                     mode=args.mode,
                     debug=args.debug,
-                    debug_output_dir=args.debug_output_dir
+                    debug_output_dir=args.debug_output_dir,
+                    player_track_imgsz=args.player_track_imgsz,
+                    pitch_every_n_frames=args.pitch_every_n_frames,
+                    ball_track_imgsz=args.ball_track_imgsz,
+                    ball_track_every_n_frames=args.ball_track_every_n_frames,
+                    ball_track_conf=args.ball_track_conf,
+                    ball_max_hold_frames=args.ball_max_hold_frames,
                 )
             except Exception as err:
                 print('Error', err)
@@ -1120,6 +1169,12 @@ if __name__ == '__main__':
             device=args.device,
             mode=args.mode,
             debug=args.debug,
-            debug_output_dir=args.debug_output_dir
+            debug_output_dir=args.debug_output_dir,
+            player_track_imgsz=args.player_track_imgsz,
+            pitch_every_n_frames=args.pitch_every_n_frames,
+            ball_track_imgsz=args.ball_track_imgsz,
+            ball_track_every_n_frames=args.ball_track_every_n_frames,
+            ball_track_conf=args.ball_track_conf,
+            ball_max_hold_frames=args.ball_max_hold_frames,
         )
         
