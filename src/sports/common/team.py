@@ -354,7 +354,9 @@ class TeamClassifier:
         # FASE 2: 🧠 Treinar K-Means APENAS com histogramas de jogadores (zero ruído)
         # ============================================================================
         if len(player_features) > 1:
-            current_kmeans = KMeans(n_clusters=2, init="k-means++", n_init=10, max_iter=300)
+            init = self.previous_centers if self.previous_centers is not None else "k-means++"
+            n_init = 1 if self.previous_centers is not None else 3
+            current_kmeans = KMeans(n_clusters=2, init=init, n_init=n_init, max_iter=100)
             current_kmeans.fit(player_features)
             
             # 🎯 NOVA ESTRATÉGIA: Usar jogadores BLOQUEADOS para determinar swap

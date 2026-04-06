@@ -54,3 +54,16 @@ training/notebooks/runs/
 *.tmp
 *.bak
 debug_team_output/
+
+# --- AI assistants ---
+.claude/
+
+# --- TensorRT cache ---
+trt_cache/
+
+# --- Training runs (root) ---
+/runs/
+
+# --- Model exports ---
+models/**/*.engine
+models/**/*.onnx
