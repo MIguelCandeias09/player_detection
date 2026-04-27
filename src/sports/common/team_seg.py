@@ -6,10 +6,11 @@ from collections import deque, Counter
 
 class TeamClassifierSeg:
     """
-    Classificador de equipas usando MASCARAS DE SEGMENTACAO + Histogramas + K-Means + Votação Temporal.
+    Classificador de equipas usando MASCARAS DE SEGMENTACAO + Histogramas 3D (HSV) + K-Means + Votação Temporal.
 
-    Em vez de remover a relva por HSV (aproximação), usa a máscara de segmentação
-    do yolo11m-seg para isolar exatamente os pixels do jogador — sem relva, sem fundo.
+    Usa a máscara de segmentação do yolo11m-seg para isolar exatamente os pixels
+    do jogador — sem relva, sem fundo. Extrai histogramas 3D (Hue + Saturation + Value)
+    para discriminar equipas mesmo com cores semelhantes (ex: vermelho escuro vs claro).
 
     Args:
         debug (bool): Se True, imprime informação de debug no terminal.
@@ -20,22 +21,26 @@ class TeamClassifierSeg:
         self.player_team_history = {}
         self.player_class_history = {}
         self.locked_player_teams = {}
-        self.HISTORY_LENGTH = 30
+        self.HISTORY_LENGTH = 20
         self.CLASS_HISTORY_LENGTH = 60
-        self.LOCK_THRESHOLD = 30
+        self.LOCK_THRESHOLD = 20
         self.GK_CONSISTENCY_THRESHOLD = 0.7
 
-        self.HIST_BINS = [8, 8]
-        self.HIST_RANGES = [0, 180, 0, 256]
+        # Histograma 3D: H(8) × S(8) × V(4) = 256 features
+        # V com menos bins porque variações absolutas de brilho (iluminação) são
+        # menos informativas que a distinção escuro/claro (4 bins basta)
+        self.HIST_BINS = [8, 8, 4]
+        self.HIST_RANGES = [0, 180, 0, 256, 0, 256]
+        self.HIST_CHANNELS = [0, 1, 2]
 
         self.debug = debug
 
     def get_player_feature(self, frame, bbox, mask=None, mask_is_full_res=False):
         """
-        Extrai histograma 2D (H+S) usando máscara de segmentação.
+        Extrai histograma 3D (H+S+V) usando máscara de segmentação.
 
         Se a máscara estiver disponível, isola exatamente os pixels do jogador.
-        Sem máscara, faz fallback ao método HSV (compatibilidade).
+        Sem máscara, faz fallback ao método HSV com remoção de relva.
 
         Args:
             frame: Frame BGR completo
@@ -45,7 +50,7 @@ class TeamClassifierSeg:
             mask_is_full_res: Se True, salta o cv2.resize (otimização).
 
         Returns:
-            np.ndarray: Vetor de 64 features ou None se falhar
+            np.ndarray: Vetor de 256 features (8×8×4) ou None se falhar
         """
         y1, y2 = int(bbox[1]), int(bbox[3])
         x1, x2 = int(bbox[0]), int(bbox[2])
@@ -69,10 +74,18 @@ class TeamClassifierSeg:
             if player_crop.size == 0:
                 return None
 
-            # Foco na metade superior (zona da camisola)
+            # Zona da camisola: crop adaptativo ao tamanho da bbox
+            # - bbox grande (jogador próximo): skip cabeça (10%→55%)
+            # - bbox pequena (jogador distante): usa top 55% para ter pixels suficientes
             h, w = player_crop.shape[:2]
-            player_crop = player_crop[0:int(h * 0.5), :]
-            mask_crop = mask_crop[0:int(h * 0.5), :]
+            if h >= 60:
+                y_start = int(h * 0.10)
+                y_end = int(h * 0.55)
+            else:
+                y_start = 0
+                y_end = int(h * 0.55)
+            player_crop = player_crop[y_start:y_end, :]
+            mask_crop = mask_crop[y_start:y_end, :]
 
             mask_uint8 = mask_crop.astype(np.uint8) * 255
 
@@ -80,13 +93,29 @@ class TeamClassifierSeg:
                 return None
 
             hsv = cv2.cvtColor(player_crop, cv2.COLOR_BGR2HSV)
-            hist = cv2.calcHist([hsv], [0, 1], mask_uint8, self.HIST_BINS, self.HIST_RANGES)
+
+            # Filtrar relva mesmo dentro da máscara (trata leakage da segmentação).
+            # A máscara do yolo11m-seg pode incluir pixels de relva à volta do
+            # jogador. Se contaminarem o histograma, ambas as equipas ficam
+            # dominadas por verde → K-Means não consegue separar.
+            lower_green = np.array([35, 40, 40])
+            upper_green = np.array([85, 255, 255])
+            grass_mask = cv2.inRange(hsv, lower_green, upper_green)
+            non_grass_mask = cv2.bitwise_not(grass_mask)
+            final_mask = cv2.bitwise_and(mask_uint8, non_grass_mask)
+
+            # Se sobrou pouco (ex: camisola muito verde), fallback à máscara original
+            if cv2.countNonZero(final_mask) < 10:
+                final_mask = mask_uint8
+
+            hist = cv2.calcHist([hsv], self.HIST_CHANNELS, final_mask,
+                                self.HIST_BINS, self.HIST_RANGES)
 
         else:
             # Fallback: crop + remoção de relva por HSV (método original)
             image = frame[y1:y2, x1:x2]
             h, w, _ = image.shape
-            image = image[0:int(h * 0.5), int(w * 0.2):int(w * 0.8)]
+            image = image[int(h * 0.10):int(h * 0.55), int(w * 0.2):int(w * 0.8)]
 
             if image.size == 0:
                 return None
@@ -100,7 +129,8 @@ class TeamClassifierSeg:
             if cv2.countNonZero(non_grass_mask) < 10:
                 return None
 
-            hist = cv2.calcHist([hsv], [0, 1], non_grass_mask, self.HIST_BINS, self.HIST_RANGES)
+            hist = cv2.calcHist([hsv], self.HIST_CHANNELS, non_grass_mask,
+                                self.HIST_BINS, self.HIST_RANGES)
 
         hist = cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
         return hist.flatten()
@@ -167,7 +197,9 @@ class TeamClassifierSeg:
         # FASE 2: Treinar K-Means com histogramas de jogadores
         if len(player_features) > 1:
             init = self.previous_centers if self.previous_centers is not None else "k-means++"
-            n_init = 1 if self.previous_centers is not None else 3
+            # Primeiro frame: 10 inicializações para melhor separação inicial
+            # Frames seguintes: warm-start com centros anteriores (1 basta)
+            n_init = 1 if self.previous_centers is not None else 10
             current_kmeans = KMeans(n_clusters=2, init=init, n_init=n_init, max_iter=100)
             current_kmeans.fit(player_features)
 
@@ -211,7 +243,7 @@ class TeamClassifierSeg:
             return player_detections
 
         # FASE 3: Classificar jogadores + Soft Lock + Votação Temporal
-        CORRECTION_THRESHOLD = 0.9
+        CORRECTION_THRESHOLD = 0.85
 
         for idx_in_list, i in enumerate(player_indices):
             if player_detections.tracker_id is None or i >= len(player_detections.tracker_id):

@@ -26,6 +26,7 @@ except (ImportError, Exception):
 print('importing sports files')
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
+from sports.distance_tracker import DistanceTracker
 from sports.common.ball_interpolator import RealTimeBallInterpolator, InterpolatedBallAnnotator
 from sports.common.team_seg import TeamClassifierSeg
 from sports.common.view import ViewTransformer
@@ -38,18 +39,11 @@ PROJECT_ROOT = os.path.dirname(PARENT_DIR)  # One level up from src/
 # BoT-SORT Tracker Configuration (with GMC for camera motion compensation)
 BOTSORT_CONFIG_PATH = os.path.join(PROJECT_ROOT, 'configs', 'futebol_botsort.yaml')
 BALL_BOTSORT_FAST_CONFIG_PATH = os.path.join(PROJECT_ROOT, 'configs', 'futebol_botsort_fast.yaml')
-# yolo11m-seg: segmentation model for players — produces masks used for team classification
-# Nota: testamos .engine (TensorRT FP16) mas a precisao das mascaras degradou a classificacao
-# de equipas (histogramas HSV contaminados). Ficamos com o .pt que mantem os resultados bons.
-# O .engine continua no disco caso queiramos re-testar (ex.: re-exportar com retina_masks=True).
 PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'yolo11m_seg_players.pt')
-# PLAYER_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'football-player-detection_mike.pt')  # old model
-# PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'football-pitch-detection-mike_1280.pt')
-PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'pitch_v11m_640_footar_best.pt')  # Modelo anterior (mais estável)
-# PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'pitch_y11x_keypoint_best.pt')  # YOLOv11x-pose 32-keypoint (65.8% mAP50) - PRECISA MELHORIAS
-# Use the newly trained YOLOv11m ball detector (74.6% mAP50, 68.0% recall, 87.9% precision @ 1024px)
-BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'ball_y11m_footar_best.pt')
-# BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'ball_y12s_optimized_best.pt')  # previous version
+PITCH_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'pitch_v11m_640_footar_best.pt')
+BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'ball_y11m_1280_footar_best.pt')
+# BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'active', 'ball_y11m_footar_best.pt')  # anterior (1024px, mAP50=0.755, recall=0.433)
+# BALL_DETECTION_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models', 'archive', 'ball_y12s_optimized_best.pt')  # versão mais antiga
 
 BALL_CLASS_ID = 0
 GOALKEEPER_CLASS_ID = 1
@@ -178,8 +172,17 @@ def resolve_goalkeepers_team_id(
     """
     goalkeepers_xy = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
     players_xy = players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-    team_0_centroid = players_xy[players_team_id == 0].mean(axis=0)
-    team_1_centroid = players_xy[players_team_id == 1].mean(axis=0)
+
+    team_0_xy = players_xy[players_team_id == 0]
+    team_1_xy = players_xy[players_team_id == 1]
+
+    # Se faltar alguma das equipas (frames iniciais sem classificação),
+    # não há centroides fiáveis — devolve -1 para cada GK
+    if len(team_0_xy) == 0 or len(team_1_xy) == 0:
+        return np.full(len(goalkeepers_xy), -1, dtype=int)
+
+    team_0_centroid = team_0_xy.mean(axis=0)
+    team_1_centroid = team_1_xy.mean(axis=0)
     goalkeepers_team_id = []
     for goalkeeper_xy in goalkeepers_xy:
         dist_0 = np.linalg.norm(goalkeeper_xy - team_0_centroid)
@@ -216,7 +219,7 @@ def render_radar(
     color_lookup: np.ndarray
 ) -> np.ndarray:
 
-    # ⚠️ PROTEÇÃO: Verificar se keypoints não está vazio
+    #  PROTEÇÃO: Verificar se keypoints não está vazio
     if keypoints is None or len(keypoints.xy) == 0 or len(keypoints.xy[0]) == 0:
         # Sem keypoints - retornar radar vazio
         return np.zeros((CONFIG.width, CONFIG.length, 3), dtype=np.uint8)
@@ -232,7 +235,7 @@ def render_radar(
     
     # print('mask', mask)
     
-    # ⚠️ PROTEÇÃO: Verificar se há keypoints suficientes após filtro
+    #  PROTEÇÃO: Verificar se há keypoints suficientes após filtro
     if np.sum(mask) < 4:
         # Menos de 4 keypoints válidos - não dá para fazer transformação
         # Retornar radar vazio
@@ -376,7 +379,7 @@ def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarr
     ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
-    # 🎯 Real-time interpolator with fixed buffer (30 frames = ~1.2s @ 25fps)
+    #  Real-time interpolator with fixed buffer (30 frames = ~1.2s @ 25fps)
     interpolator = RealTimeBallInterpolator(buffer_size=30)
     annotator = InterpolatedBallAnnotator(radius=8, trail_length=15)
 
@@ -389,31 +392,31 @@ def run_ball_detection(source_video_path: str, device: str) -> Iterator[np.ndarr
         slice_wh=(640, 640),
     )
 
-    # 📊 MAIN LOOP: Process frames and fill buffer
+    # MAIN LOOP: Process frames and fill buffer
     for frame in frame_generator:
         detections = slicer(frame).with_nms(threshold=0.1)
         balls = detections[detections.class_id == BALL_CLASS_ID]
         
-        # 🎯 FILTER 1: Remove detections with very small area (noise/feet)
+        # FILTER 1: Remove detections with very small area (noise/feet)
         if len(balls) > 0:
             areas = (balls.xyxy[:, 2] - balls.xyxy[:, 0]) * (balls.xyxy[:, 3] - balls.xyxy[:, 1])
             min_area = 100  # Minimum ball area in 640x640 slice
             balls = balls[areas >= min_area]
         
-        # 🎯 FILTER 2: Keep only HIGHEST confidence detection (only 1 ball exists)
+        # FILTER 2: Keep only HIGHEST confidence detection (only 1 ball exists)
         if len(balls) > 0:
             best_idx = np.argmax(balls.confidence)
             balls = balls[best_idx:best_idx+1]
         
-        # ⏱️ Add frame to buffer (with interpolation logic)
+        # Add frame to buffer (with interpolation logic)
         buffered_frame = interpolator.add_frame(frame, balls)
         
-        # 📤 OUTPUT: Only yield when buffer is full (delayed output with interpolation)
+        # OUTPUT: Only yield when buffer is full (delayed output with interpolation)
         if buffered_frame is not None:
             annotated_frame = annotator.annotate(buffered_frame.frame, buffered_frame)
             yield annotated_frame
     
-    # 🔚 FLUSH: Process remaining frames in buffer
+    # FLUSH: Process remaining frames in buffer
     for buffered_frame in interpolator.flush_buffer():
         annotated_frame = annotator.annotate(buffered_frame.frame, buffered_frame)
         yield annotated_frame
@@ -443,7 +446,7 @@ def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndar
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
     for frame in frame_generator:
-        # 🎯 YOLO native tracking with BoT-SORT + GMC
+        # YOLO native tracking with BoT-SORT + GMC
         results = player_detection_model.track(
             frame,
             imgsz=1280,
@@ -491,7 +494,7 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path, stride=STRIDE)
 
-    # 🎯 Initialize TeamClassifierSeg (seg-mask based team classification)
+    # Initialize TeamClassifierSeg (seg-mask based team classification)
     team_classifier = TeamClassifierSeg(debug=debug)
     print('✅ TeamClassifierSeg initialized (segmentation mask mode)')
     if debug:
@@ -500,7 +503,7 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
     for frame in frame_generator:
-        # 🎯 YOLO seg tracking com BoT-SORT + GMC (produz masks)
+        # YOLO seg tracking com BoT-SORT + GMC (produz masks)
         results = player_detection_model.track(
             frame,
             imgsz=1024,
@@ -529,7 +532,7 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
         players = detections[player_bool]
         player_masks = all_masks[player_bool] if all_masks is not None else None
 
-        # 🎯 Classificar equipas usando máscaras de segmentação
+        # Classificar equipas usando máscaras de segmentação
         players = team_classifier.assign_team(frame, players, masks=player_masks)
 
         if hasattr(players, 'team_id') and players.team_id is not None:
@@ -587,7 +590,7 @@ def run_radar(
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path, stride=STRIDE)
     performanceMeter('initializing models')
 
-    # 🎯 Initialize TeamClassifierSeg (seg-mask based)
+    # Initialize TeamClassifierSeg (seg-mask based)
     team_classifier = TeamClassifierSeg()
     print('✅ TeamClassifierSeg initialized (segmentation mask mode)')
     
@@ -620,7 +623,7 @@ def run_radar(
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
-    # 🎯 Modelo DEDICADO de bola com tracking + GMC
+    #  Modelo DEDICADO de bola com tracking + GMC
     # Ajuste de performance via argumentos (imgsz, frequência e confidence)
     ball_detection_model = YOLO(BALL_DETECTION_MODEL_PATH).to(device=device)
     pitch_every_n_frames = max(1, int(pitch_every_n_frames))
@@ -633,10 +636,11 @@ def run_radar(
 
     last_keypoints = None
     last_detections = None
-    
+
     frame_counter = 0
-    
-    # 🎯 Buffer de dados para sincronização (players, keypoints, etc)
+    distance_tracker = DistanceTracker(fps=video_info.fps)
+
+    # Buffer de dados para sincronização (players, keypoints, etc)
     # Como a bola tem delay de 30 frames, precisamos armazenar os outros dados também
     sync_buffer = deque(maxlen=30)
 
@@ -646,7 +650,7 @@ def run_radar(
         performanceMeter()
         frame_counter += 1
 
-        # 🎯 Pitch detection só a cada N frames (reutiliza os últimos keypoints)
+        # Pitch detection só a cada N frames (reutiliza os últimos keypoints)
         should_run_pitch = (frame_counter % pitch_every_n_frames == 0) or (last_keypoints is None)
         if should_run_pitch:
             result = pitch_detection_model(frame, half=True, verbose=False)[0]
@@ -660,7 +664,7 @@ def run_radar(
         else:
             keypoints = last_keypoints
         
-        # 🎯 YOLO seg tracking com BoT-SORT + GMC (produz masks)
+        # YOLO seg tracking com BoT-SORT + GMC (produz masks)
         results = player_detection_model.track(
             frame,
             imgsz=player_track_imgsz,
@@ -743,7 +747,7 @@ def run_radar(
         referees = detections[detections.class_id == REFEREE_CLASS_ID]
         
         if frame_counter % ball_track_every_n_frames == 0 or len(last_balls) == 0:
-            # 🎯 Ball tracking com BoT-SORT FAST (sem GMC duplicado)
+            # Ball tracking com BoT-SORT FAST (sem GMC duplicado)
             ball_results = ball_detection_model.track(
                 frame,
                 imgsz=ball_track_imgsz,
@@ -761,13 +765,13 @@ def run_radar(
                 valid_ball_mask = balls.tracker_id != -1
                 balls = balls[valid_ball_mask]
 
-            # 🎯 FILTER 1: Remove detections with very small area (noise/feet)
+            # FILTER 1: Remove detections with very small area (noise/feet)
             if len(balls) > 0:
                 areas = (balls.xyxy[:, 2] - balls.xyxy[:, 0]) * (balls.xyxy[:, 3] - balls.xyxy[:, 1])
                 min_area = 100  # Bola mínima: ~10x10 pixels
                 balls = balls[areas >= min_area]
 
-            # 🎯 FILTER 2: Keep only the HIGHEST confidence detection (only 1 ball exists)
+            # FILTER 2: Keep only the HIGHEST confidence detection (only 1 ball exists)
             if len(balls) > 0:
                 best_idx = np.argmax(balls.confidence)
                 balls = balls[best_idx:best_idx+1]  # Keep only the best one
@@ -864,7 +868,9 @@ def run_radar(
             'keypoints': keypoints,
             'frame_counter': frame_counter
         })
-        
+
+        distance_tracker.update(frame_counter, detections_merged, keypoints)
+
         # 🎯 Add ball detection to interpolator (triggers interpolation)
         buffered_ball = ball_interpolator.add_frame(frame, balls)
         
@@ -1008,8 +1014,10 @@ def run_radar(
                     height=radar_h
                 )
                 annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
-            
+
             yield annotated_frame
+
+    distance_tracker.print_report()
 
 
 def main(
@@ -1140,6 +1148,11 @@ def main(
             fps_buffer = deque(maxlen=30)
             frame_start_time = time.time()
 
+            # Janela redimensionável para caber no ecrã
+            WINDOW_NAME = 'FootAR - Player Detection'
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+
             for frame in frame_generator:
                 frame_count += 1
                 current_time = time.time()
@@ -1151,7 +1164,7 @@ def main(
                 cv2.putText(frame, f'Frame {frame_count}/{video_info.total_frames} | FPS: {actual_fps:.1f}',
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-                cv2.imshow('FootAR - Player Detection', frame)
+                cv2.imshow(WINDOW_NAME, frame)
                 
                 # Control playback speed
                 wait_ms = max(1, int((target_frame_time - frame_time) * 1000)) if frame_time < target_frame_time else 1
@@ -1183,7 +1196,7 @@ if __name__ == '__main__':
     parser.add_argument('--ball_max_hold_frames', type=int, default=3, help='Keep last ball detection for N miss frames (RADAR mode)')
     args = parser.parse_args()
 
-    print('🎯 Football Analysis System - BoT-SORT with GMC')
+    print('Football Analysis System - BoT-SORT with GMC')
     print('args', args)
 
     if os.path.isdir(args.source_video_path):
