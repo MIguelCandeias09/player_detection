@@ -1,4 +1,5 @@
 import argparse
+import json
 from enum import Enum
 from typing import Iterator, List
 from collections import deque
@@ -116,6 +117,23 @@ class Mode(Enum):
     PLAYER_TRACKING = 'PLAYER_TRACKING'
     TEAM_CLASSIFICATION = 'TEAM_CLASSIFICATION'
     RADAR = 'RADAR'
+
+
+DEFAULT_MODE = Mode.RADAR
+DEFAULT_DEVICE = 'cuda'
+DEFAULT_PLAYER_TRACK_IMGSZ = 1024
+DEFAULT_PITCH_EVERY_N_FRAMES = 5
+DEFAULT_BALL_TRACK_IMGSZ = 960
+DEFAULT_BALL_TRACK_EVERY_N_FRAMES = 2
+DEFAULT_BALL_TRACK_CONF = 0.25
+DEFAULT_BALL_MAX_HOLD_FRAMES = 3
+STRUCTURED_EVENT_PREFIX = 'FOOTAR_EVENT '
+
+
+def emit_structured_event(enabled: bool, event: str, **payload) -> None:
+    if not enabled:
+        return
+    print(STRUCTURED_EVENT_PREFIX + json.dumps({'event': event, **payload}, ensure_ascii=True), flush=True)
 
 
 def get_crops(frame: np.ndarray, detections: sv.Detections) -> List[np.ndarray]:
@@ -589,12 +607,12 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
 def run_radar(
     source_video_path: str,
     device: str,
-    player_track_imgsz: int = 1120,
-    pitch_every_n_frames: int = 2,
-    ball_track_imgsz: int = 960,
-    ball_track_every_n_frames: int = 1,
-    ball_track_conf: float = 0.25,
-    ball_max_hold_frames: int = 3,
+    player_track_imgsz: int = DEFAULT_PLAYER_TRACK_IMGSZ,
+    pitch_every_n_frames: int = DEFAULT_PITCH_EVERY_N_FRAMES,
+    ball_track_imgsz: int = DEFAULT_BALL_TRACK_IMGSZ,
+    ball_track_every_n_frames: int = DEFAULT_BALL_TRACK_EVERY_N_FRAMES,
+    ball_track_conf: float = DEFAULT_BALL_TRACK_CONF,
+    ball_max_hold_frames: int = DEFAULT_BALL_MAX_HOLD_FRAMES,
 ) -> Iterator[np.ndarray]:
     print('run_radar')
     performanceMeter()
@@ -1047,12 +1065,14 @@ def main(
     device: str,
     mode: Mode,
     debug: bool = False,
-    player_track_imgsz: int = 1120,
-    pitch_every_n_frames: int = 2,
-    ball_track_imgsz: int = 960,
-    ball_track_every_n_frames: int = 1,
-    ball_track_conf: float = 0.25,
-    ball_max_hold_frames: int = 3,
+    player_track_imgsz: int = DEFAULT_PLAYER_TRACK_IMGSZ,
+    pitch_every_n_frames: int = DEFAULT_PITCH_EVERY_N_FRAMES,
+    ball_track_imgsz: int = DEFAULT_BALL_TRACK_IMGSZ,
+    ball_track_every_n_frames: int = DEFAULT_BALL_TRACK_EVERY_N_FRAMES,
+    ball_track_conf: float = DEFAULT_BALL_TRACK_CONF,
+    ball_max_hold_frames: int = DEFAULT_BALL_MAX_HOLD_FRAMES,
+    preview: bool = True,
+    structured_logs: bool = False,
 ) -> None:
     print('main')
 
@@ -1081,9 +1101,20 @@ def main(
         raise NotImplementedError(f"Mode {mode} is not implemented.")
 
     video_info = sv.VideoInfo.from_video_path(source_video_path)
+    total_frames = int(video_info.total_frames or 0)
+    mode_value = mode.value if isinstance(mode, Mode) else str(mode)
 
     if target_video_path is not None:
         print(f'Processing and saving video: {source_video_path} -> {target_video_path}')
+        emit_structured_event(
+            structured_logs,
+            'started',
+            source_video_path=source_video_path,
+            target_video_path=target_video_path,
+            total_frames=total_frames,
+            mode=mode_value,
+            device=device,
+        )
         frame_count = 0
         with sv.VideoSink(target_video_path, video_info) as sink:
             for frame in frame_generator:
@@ -1091,26 +1122,74 @@ def main(
                 frame_count += 1
                 if frame_count % 30 == 0:
                     print(f'Processed {frame_count}/{video_info.total_frames} frames', end='\r')
+                if structured_logs and (frame_count % 10 == 0 or frame_count == total_frames):
+                    progress = frame_count / total_frames if total_frames else 0
+                    emit_structured_event(
+                        structured_logs,
+                        'progress',
+                        processed_frames=frame_count,
+                        total_frames=total_frames,
+                        progress=progress,
+                    )
                 
                 # Show frame in window
-                try:
-                    cv2.imshow("Player Detection", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        print('\nStopped by user (pressed q)')
-                        break
-                except:
-                    pass  # Ignore if display not available
+                if preview:
+                    try:
+                        cv2.imshow("Player Detection", frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            print('\nStopped by user (pressed q)')
+                            break
+                    except:
+                        pass  # Ignore if display not available
         
         try:
             cv2.destroyAllWindows()
         except:
             pass
         print(f'\nDone! Output saved to: {target_video_path}')
+        emit_structured_event(
+            structured_logs,
+            'completed',
+            processed_frames=frame_count,
+            total_frames=total_frames,
+            progress=1.0,
+            output_path=target_video_path,
+        )
     else:
         print(f'Processing video in real-time: {source_video_path}')
         print('Processing... (close the window or Ctrl+C to stop)')
+        emit_structured_event(
+            structured_logs,
+            'started',
+            source_video_path=source_video_path,
+            target_video_path=None,
+            total_frames=total_frames,
+            mode=mode_value,
+            device=device,
+        )
         
-        if False:  # matplotlib desativado: cv2.imshow é muito mais rápido para tempo real
+        if not preview:
+            frame_count = 0
+            for _frame in frame_generator:
+                frame_count += 1
+                if structured_logs and (frame_count % 10 == 0 or frame_count == total_frames):
+                    progress = frame_count / total_frames if total_frames else 0
+                    emit_structured_event(
+                        structured_logs,
+                        'progress',
+                        processed_frames=frame_count,
+                        total_frames=total_frames,
+                        progress=progress,
+                    )
+            print(f'Processed {frame_count}/{video_info.total_frames} frames total')
+            emit_structured_event(
+                structured_logs,
+                'completed',
+                processed_frames=frame_count,
+                total_frames=total_frames,
+                progress=1.0,
+            )
+        elif False:  # matplotlib desativado: cv2.imshow é muito mais rápido para tempo real
             # Use matplotlib for display
             fig, ax = plt.subplots(figsize=(12, 8))
             plt.ion()  # Interactive mode
@@ -1204,15 +1283,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Football Player Detection with BoT-SORT Tracking (GMC enabled)')
     parser.add_argument('--source_video_path', type=str, required=True, help='Path to input video or directory')
     parser.add_argument('--target_video_path', type=str, required=False, help='Path to save output video (optional)')
-    parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to run inference on')
-    parser.add_argument('--mode', type=Mode, default=Mode.RADAR, help='Processing mode')
+    parser.add_argument('--device', type=str, default=DEFAULT_DEVICE, choices=['cpu', 'cuda'], help='Device to run inference on')
+    parser.add_argument('--mode', type=Mode, default=DEFAULT_MODE, help='Processing mode')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
-    parser.add_argument('--player_track_imgsz', type=int, default=1024, help='Player tracking image size for RADAR mode (match seg training imgsz)')
-    parser.add_argument('--pitch_every_n_frames', type=int, default=5, help='Run pitch detection every N frames (RADAR mode)')
-    parser.add_argument('--ball_track_imgsz', type=int, default=960, help='Ball tracking image size for RADAR mode')
-    parser.add_argument('--ball_track_every_n_frames', type=int, default=2, help='Run ball tracking every N frames (RADAR mode)')
-    parser.add_argument('--ball_track_conf', type=float, default=0.25, help='Ball tracking confidence threshold (RADAR mode)')
-    parser.add_argument('--ball_max_hold_frames', type=int, default=3, help='Keep last ball detection for N miss frames (RADAR mode)')
+    parser.add_argument('--player_track_imgsz', type=int, default=DEFAULT_PLAYER_TRACK_IMGSZ, help='Player tracking image size for RADAR mode (match seg training imgsz)')
+    parser.add_argument('--pitch_every_n_frames', type=int, default=DEFAULT_PITCH_EVERY_N_FRAMES, help='Run pitch detection every N frames (RADAR mode)')
+    parser.add_argument('--ball_track_imgsz', type=int, default=DEFAULT_BALL_TRACK_IMGSZ, help='Ball tracking image size for RADAR mode')
+    parser.add_argument('--ball_track_every_n_frames', type=int, default=DEFAULT_BALL_TRACK_EVERY_N_FRAMES, help='Run ball tracking every N frames (RADAR mode)')
+    parser.add_argument('--ball_track_conf', type=float, default=DEFAULT_BALL_TRACK_CONF, help='Ball tracking confidence threshold (RADAR mode)')
+    parser.add_argument('--ball_max_hold_frames', type=int, default=DEFAULT_BALL_MAX_HOLD_FRAMES, help='Keep last ball detection for N miss frames (RADAR mode)')
+    parser.add_argument('--no_preview', action='store_true', help='Disable OpenCV preview windows')
+    parser.add_argument('--structured_logs', action='store_true', help='Emit machine-readable progress events')
     args = parser.parse_args()
 
     print('Football Analysis System - BoT-SORT with GMC')
@@ -1252,6 +1333,8 @@ if __name__ == '__main__':
                     ball_track_every_n_frames=args.ball_track_every_n_frames,
                     ball_track_conf=args.ball_track_conf,
                     ball_max_hold_frames=args.ball_max_hold_frames,
+                    preview=not args.no_preview,
+                    structured_logs=args.structured_logs,
                 )
             except Exception as err:
                 print('Error', err)
@@ -1272,5 +1355,7 @@ if __name__ == '__main__':
             ball_track_every_n_frames=args.ball_track_every_n_frames,
             ball_track_conf=args.ball_track_conf,
             ball_max_hold_frames=args.ball_max_hold_frames,
+            preview=not args.no_preview,
+            structured_logs=args.structured_logs,
         )
         

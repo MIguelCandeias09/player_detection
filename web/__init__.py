@@ -1,0 +1,2 @@
+"""FootAR web application modules."""
+
