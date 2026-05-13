@@ -346,7 +346,7 @@ def run_player_detection(source_video_path: str, device: str) -> Iterator[np.nda
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH, task='segment')
     else:
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
-    mask_annotator = sv.MaskAnnotator(color=sv.ColorPalette.from_hex(COLORS), opacity=0.4)
+    mask_annotator = sv.MaskAnnotator(color=sv.ColorPalette.from_hex(COLORS), opacity=0.65)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     for frame in frame_generator:
         result = player_detection_model(frame, imgsz=1024, half=True, verbose=False)[0]
@@ -438,51 +438,72 @@ def run_player_tracking(source_video_path: str, device: str) -> Iterator[np.ndar
     Yields:
         Iterator[np.ndarray]: Iterator over annotated frames with tracked players.
     """
-    # TensorRT engines nao suportam .to() e precisam de task explicito; .pt segue o caminho antigo
     if PLAYER_DETECTION_MODEL_PATH.endswith('.engine'):
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH, task='segment')
     else:
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
+
+    TRAIL_LENGTH = 25  # número de posições guardadas por jogador
+    trail_history = {}  # tracker_id → deque[(x, y)]
+
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
-    
+
     for frame in frame_generator:
-        # YOLO native tracking with BoT-SORT + GMC
         results = player_detection_model.track(
             frame,
             imgsz=1280,
             half=True,
-            conf=0.1,  # Low threshold for tracker to catch everything
-            persist=True,  # CRITICAL: Maintain IDs across frames
-            tracker=BOTSORT_CONFIG_PATH,  # Custom BoT-SORT config with GMC
+            conf=0.1,
+            persist=True,
+            tracker=BOTSORT_CONFIG_PATH,
             verbose=False
         )
-        
-        # Extract detections with tracker IDs
+
         detections = sv.Detections.from_ultralytics(results[0])
-        
-        # Filter out detections without tracker IDs (if any)
+
         if detections.tracker_id is not None:
-            valid_mask = detections.tracker_id != -1  # -1 means no ID assigned
+            valid_mask = detections.tracker_id != -1
             detections = detections[valid_mask]
-        
-        labels = [str(int(tid)) for tid in detections.tracker_id] if detections.tracker_id is not None else []
+
+        # Atualizar histórico de posições (pés de cada jogador)
+        if detections.tracker_id is not None:
+            feet_xy = detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            for tid, (x, y) in zip(detections.tracker_id, feet_xy):
+                tid = int(tid)
+                if tid not in trail_history:
+                    trail_history[tid] = deque(maxlen=TRAIL_LENGTH)
+                trail_history[tid].append((int(x), int(y)))
 
         annotated_frame = frame.copy()
+
+        # Desenhar rastos antes das elipses (jogadores ficam por cima)
+        active_ids = set(int(tid) for tid in detections.tracker_id) if detections.tracker_id is not None else set()
+        for tid, positions in trail_history.items():
+            if tid not in active_ids:
+                continue  # só desenha rasto de jogadores visíveis no frame atual
+            pts = list(positions)
+            n = len(pts)
+            for j, (x, y) in enumerate(pts):
+                t = j / max(n - 1, 1)  # 0=mais antigo → 1=mais recente
+                radius = max(1, int(5 * t))
+                brightness = int(80 + 175 * t)  # escuro (antigo) → branco (recente)
+                cv2.circle(annotated_frame, (x, y), radius, (brightness, brightness, brightness), -1)
+
+        labels = [str(int(tid)) for tid in detections.tracker_id] if detections.tracker_id is not None else []
         annotated_frame = ELLIPSE_ANNOTATOR.annotate(annotated_frame, detections)
         annotated_frame = ELLIPSE_LABEL_ANNOTATOR.annotate(annotated_frame, detections, labels=labels)
 
         yield annotated_frame
 
 
-def run_team_classification(source_video_path: str, device: str, debug: bool = False, debug_output_dir: str = "debug_team_output") -> Iterator[np.ndarray]:
+def run_team_classification(source_video_path: str, device: str, debug: bool = False) -> Iterator[np.ndarray]:
     """
     Run team classification on a video and yield annotated frames with team colors.
 
     Args:
         source_video_path (str): Path to the source video.
         device (str): Device to run the model on (e.g., 'cpu', 'cuda').
-        debug (bool): Enable debug mode to save visualization images.
-        debug_output_dir (str): Directory to save debug images.
+        debug (bool): Enable debug mode — abre janelas de crops e K-Means a cada 30 frames.
 
     Yields:
         Iterator[np.ndarray]: Iterator over annotated frames.
@@ -498,7 +519,7 @@ def run_team_classification(source_video_path: str, device: str, debug: bool = F
     team_classifier = TeamClassifierSeg(debug=debug)
     print('✅ TeamClassifierSeg initialized (segmentation mask mode)')
     if debug:
-        print(f'🔬 DEBUG MODE: Terminal output enabled')
+        print(f'🔬 DEBUG MODE: janelas "Debug: Player Crops" e "Debug: K-Means Clusters" abrem a cada 30 frames')
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     
@@ -1026,7 +1047,6 @@ def main(
     device: str,
     mode: Mode,
     debug: bool = False,
-    debug_output_dir: str = "debug_team_output",
     player_track_imgsz: int = 1120,
     pitch_every_n_frames: int = 2,
     ball_track_imgsz: int = 960,
@@ -1045,7 +1065,7 @@ def main(
     elif mode == Mode.PLAYER_TRACKING:
         frame_generator = run_player_tracking(source_video_path=source_video_path, device=device)
     elif mode == Mode.TEAM_CLASSIFICATION:
-        frame_generator = run_team_classification(source_video_path=source_video_path, device=device, debug=debug, debug_output_dir=debug_output_dir)
+        frame_generator = run_team_classification(source_video_path=source_video_path, device=device, debug=debug)
     elif mode == Mode.RADAR:
         frame_generator = run_radar(
             source_video_path=source_video_path,
@@ -1187,7 +1207,6 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to run inference on')
     parser.add_argument('--mode', type=Mode, default=Mode.RADAR, help='Processing mode')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
-    parser.add_argument('--debug_output_dir', type=str, default='debug_team_output', help='Directory for debug images')
     parser.add_argument('--player_track_imgsz', type=int, default=1024, help='Player tracking image size for RADAR mode (match seg training imgsz)')
     parser.add_argument('--pitch_every_n_frames', type=int, default=5, help='Run pitch detection every N frames (RADAR mode)')
     parser.add_argument('--ball_track_imgsz', type=int, default=960, help='Ball tracking image size for RADAR mode')
@@ -1227,7 +1246,6 @@ if __name__ == '__main__':
                     device=args.device,
                     mode=args.mode,
                     debug=args.debug,
-                    debug_output_dir=args.debug_output_dir,
                     player_track_imgsz=args.player_track_imgsz,
                     pitch_every_n_frames=args.pitch_every_n_frames,
                     ball_track_imgsz=args.ball_track_imgsz,
@@ -1248,7 +1266,6 @@ if __name__ == '__main__':
             device=args.device,
             mode=args.mode,
             debug=args.debug,
-            debug_output_dir=args.debug_output_dir,
             player_track_imgsz=args.player_track_imgsz,
             pitch_every_n_frames=args.pitch_every_n_frames,
             ball_track_imgsz=args.ball_track_imgsz,
