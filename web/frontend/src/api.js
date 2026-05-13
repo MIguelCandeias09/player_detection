@@ -6,12 +6,13 @@ export async function fetchSystem() {
   return response.json();
 }
 
-export async function createJob(file, params) {
+export async function createJob(file, params, options = {}) {
   const formData = new FormData();
   formData.append("video", file);
   Object.entries(params).forEach(([key, value]) => {
     formData.append(key, String(value));
   });
+  formData.append("live", String(Boolean(options.live)));
 
   const response = await fetch("/api/jobs", {
     method: "POST",
@@ -41,4 +42,3 @@ export async function cancelJob(jobId) {
   }
   return response.json();
 }
-

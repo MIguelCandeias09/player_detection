@@ -12,6 +12,7 @@ import {
   Loader2,
   Moon,
   Play,
+  Radio,
   RefreshCw,
   Settings2,
   SlidersHorizontal,
@@ -89,6 +90,7 @@ function localizeTechnicalText(text) {
   return String(text)
     .replace(/Job queued/gi, "Processamento em fila")
     .replace(/Processor exited with code/gi, "Processador terminou com código")
+    .replace(/ModuleNotFoundError: No module named/gi, "Modulo Python em falta")
     .replace(/Processing/gi, "A processar")
     .replace(/Running/gi, "A executar")
     .replace(/Started/gi, "Iniciado")
@@ -96,7 +98,7 @@ function localizeTechnicalText(text) {
     .replace(/Finished/gi, "Terminado")
     .replace(/Saving/gi, "A guardar")
     .replace(/Saved/gi, "Guardado")
-    .replace(/Output/gi, "Resultado")
+    .replace(/\bOutput\b/gi, "Resultado")
     .replace(/Error/gi, "Erro")
     .replace(/Failed/gi, "Falhou")
     .replace(/frames/gi, "fotogramas")
@@ -510,7 +512,10 @@ function AdvancedControls({ params, devices, system, updateParam }) {
 
 function SystemPanel({ system, error, onRefresh }) {
   const missingModels = system?.models?.filter((model) => !model.exists) || [];
-  const ready = Boolean(system?.ready);
+  const modelsReady = Boolean(system && missingModels.length === 0);
+  const processor = system?.processor;
+  const processorMissing = processor?.missing_modules || [];
+  const processorReady = processor ? Boolean(processor.ready) : true;
   const cudaReady = Boolean(system?.cuda?.available);
 
   return (
@@ -521,10 +526,10 @@ function SystemPanel({ system, error, onRefresh }) {
         </div>
         <div className="readiness-summary-state">
           <MetricPill
-            icon={ready ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+            icon={modelsReady ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
             label="Modelos"
-            value={ready ? "OK" : "Falta"}
-            tone={ready ? "ok" : "warn"}
+            value={modelsReady ? "OK" : "Falta"}
+            tone={modelsReady ? "ok" : "warn"}
           />
           <ChevronDown className="summary-chevron" size={18} />
         </div>
@@ -539,10 +544,16 @@ function SystemPanel({ system, error, onRefresh }) {
 
         <div className="metric-grid">
           <MetricPill
-            icon={ready ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+            icon={modelsReady ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
             label="Modelos"
-            value={ready ? "Modelos carregados" : "Modelos em falta"}
-            tone={ready ? "ok" : "warn"}
+            value={modelsReady ? "Modelos carregados" : "Modelos em falta"}
+            tone={modelsReady ? "ok" : "warn"}
+          />
+          <MetricPill
+            icon={processorReady ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+            label="Python"
+            value={processorReady ? "Módulos OK" : "Módulos em falta"}
+            tone={processorReady ? "ok" : "warn"}
           />
           <MetricPill
             icon={<Cpu size={17} />}
@@ -556,6 +567,12 @@ function SystemPanel({ system, error, onRefresh }) {
           {cudaReady ? system.cuda.device_name : "CUDA indisponível"}
         </p>
 
+        {processor ? (
+          <p className={`device-line ${processorReady ? "ok" : "warn"}`}>
+            Python: {processor.executable}
+          </p>
+        ) : null}
+
         <div className="model-list">
           {(system?.models || []).map((model) => (
             <div className="model-row" key={model.key}>
@@ -568,6 +585,12 @@ function SystemPanel({ system, error, onRefresh }) {
         {missingModels.length > 0 ? (
           <p className="notice">
             {missingModels.map((model) => model.path).join(", ")}
+          </p>
+        ) : null}
+
+        {processorMissing.length > 0 ? (
+          <p className="notice error">
+            Módulos Python em falta no processador: {processorMissing.join(", ")}
           </p>
         ) : null}
       </div>
@@ -615,7 +638,9 @@ export function StatusPanel({ job, onCancel }) {
   const running = job && !TERMINAL_STATUSES.has(job.status);
   const outputUrl = job?.output_url;
   const previewUrl = job?.preview_url || outputUrl;
+  const liveStreamUrl = job?.live_stream_url;
   const complete = job?.status === "succeeded";
+  const showLiveStream = Boolean(job?.live_enabled && liveStreamUrl && running);
 
   return (
     <section className="panel status-panel">
@@ -651,6 +676,19 @@ export function StatusPanel({ job, onCancel }) {
       </div>
 
       {job?.error ? <p className="notice error">{localizeTechnicalText(job.error)}</p> : null}
+
+      {showLiveStream ? (
+        <div className="live-block">
+          <div className="live-block-head">
+            <span>
+              <Radio size={16} />
+              Live
+            </span>
+            <small>{job?.processed_frames ? `${job.processed_frames} fotogramas` : "A aguardar primeiro fotograma"}</small>
+          </div>
+          <img className="live-preview" src={liveStreamUrl} alt="Processamento em direto" />
+        </div>
+      ) : null}
 
       {outputUrl ? (
         <div className="output-block">
@@ -688,6 +726,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [theme, setTheme] = useState(getInitialTheme);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
 
   const running = Boolean(job && !TERMINAL_STATUSES.has(job.status));
   const canSubmit = Boolean(file && system?.ready && !running && !isSubmitting);
@@ -770,14 +809,17 @@ export default function App() {
     setIsSubmitting(true);
     setSubmitError("");
     try {
-      const created = await createJob(file, params);
+      const created = await createJob(file, params, { live: liveMode });
       setJob({
         job_id: created.job_id,
         status: "queued",
         progress: 0,
         processed_frames: 0,
         total_frames: null,
-        logs: ["Job queued"]
+        logs: ["Job queued"],
+        live_enabled: liveMode,
+        live_frame_url: liveMode ? `/api/jobs/${created.job_id}/live-frame` : null,
+        live_stream_url: liveMode ? `/api/jobs/${created.job_id}/live-stream` : null
       });
     } catch (error) {
       setSubmitError(error.message);
@@ -906,6 +948,19 @@ export default function App() {
               {submitError ? <p className="notice error">{localizeTechnicalText(submitError)}</p> : null}
 
               <div className="action-row">
+                <label className={`live-switch ${liveMode ? "active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={liveMode}
+                    disabled={running || isSubmitting}
+                    onChange={(event) => setLiveMode(event.target.checked)}
+                    aria-label="Ativar processamento Live"
+                  />
+                  <span className="live-switch-track" aria-hidden="true">
+                    <span className="live-switch-thumb" />
+                  </span>
+                  <span className="live-switch-label">{liveMode ? "Live" : "Off"}</span>
+                </label>
                 <button className="primary-button" type="submit" disabled={!canSubmit}>
                   <Play size={18} />
                   {isSubmitting ? "A preparar" : "Processar"}

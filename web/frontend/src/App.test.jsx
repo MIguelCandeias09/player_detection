@@ -26,6 +26,8 @@ const readySystem = {
 describe("FootAR frontend", () => {
   beforeEach(() => {
     global.fetch = vi.fn();
+    window.URL.createObjectURL = vi.fn(() => "blob:clip");
+    window.URL.revokeObjectURL = vi.fn();
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
   });
@@ -125,6 +127,32 @@ describe("FootAR frontend", () => {
 
     expect(screen.getAllByText("100%").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: /Descarregar/i })).toHaveAttribute("href", "/api/jobs/job-3/output");
+  });
+
+  it("submits jobs with live mode when the toggle is enabled", async () => {
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => readySystem
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ job_id: "job-live" })
+      });
+
+    render(<App />);
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith("/api/system"));
+
+    const file = new File(["video bytes"], "clip.mp4", { type: "video/mp4" });
+    fireEvent.change(screen.getByLabelText("Selecionar vídeo"), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Processar/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByLabelText("Ativar processamento Live"));
+    fireEvent.click(screen.getByRole("button", { name: /Processar/i }));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith("/api/jobs", expect.any(Object)));
+    const [, request] = global.fetch.mock.calls.find(([url]) => url === "/api/jobs");
+    expect(request.body.get("live")).toBe("true");
   });
 
   it("toggles between white and dark themes", async () => {

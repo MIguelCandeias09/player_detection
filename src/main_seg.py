@@ -136,6 +136,25 @@ def emit_structured_event(enabled: bool, event: str, **payload) -> None:
     print(STRUCTURED_EVENT_PREFIX + json.dumps({'event': event, **payload}, ensure_ascii=True), flush=True)
 
 
+def write_live_frame(live_frame_dir: str, frame: np.ndarray, frame_count: int, every_n_frames: int = 1) -> None:
+    if not live_frame_dir or every_n_frames < 1 or frame_count % every_n_frames != 0:
+        return
+
+    try:
+        os.makedirs(live_frame_dir, exist_ok=True)
+        ok, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            return
+        tmp_path = os.path.join(live_frame_dir, 'latest.tmp')
+        frame_path = os.path.join(live_frame_dir, 'latest.jpg')
+        with open(tmp_path, 'wb') as target:
+            target.write(encoded.tobytes())
+        os.replace(tmp_path, frame_path)
+    except OSError:
+        # The web server may read the previous frame at the same instant.
+        pass
+
+
 def get_crops(frame: np.ndarray, detections: sv.Detections) -> List[np.ndarray]:
     """
     Extract crops from the frame based on detected bounding boxes.
@@ -1073,8 +1092,13 @@ def main(
     ball_max_hold_frames: int = DEFAULT_BALL_MAX_HOLD_FRAMES,
     preview: bool = True,
     structured_logs: bool = False,
+    debug_output_dir: str = None,
+    live_frame_dir: str = None,
+    live_frame_every: int = 1,
 ) -> None:
     print('main')
+    if debug_output_dir:
+        os.makedirs(debug_output_dir, exist_ok=True)
 
     if mode == Mode.PITCH_DETECTION:
         frame_generator = run_pitch_detection(source_video_path=source_video_path, device=device)
@@ -1120,6 +1144,7 @@ def main(
             for frame in frame_generator:
                 sink.write_frame(frame)
                 frame_count += 1
+                write_live_frame(live_frame_dir, frame, frame_count, live_frame_every)
                 if frame_count % 30 == 0:
                     print(f'Processed {frame_count}/{video_info.total_frames} frames', end='\r')
                 if structured_logs and (frame_count % 10 == 0 or frame_count == total_frames):
@@ -1172,6 +1197,7 @@ def main(
             frame_count = 0
             for _frame in frame_generator:
                 frame_count += 1
+                write_live_frame(live_frame_dir, _frame, frame_count, live_frame_every)
                 if structured_logs and (frame_count % 10 == 0 or frame_count == total_frames):
                     progress = frame_count / total_frames if total_frames else 0
                     emit_structured_event(
@@ -1205,6 +1231,7 @@ def main(
             
             for frame in frame_generator:
                 frame_count += 1
+                write_live_frame(live_frame_dir, frame, frame_count, live_frame_every)
                 
                 # Convert BGR to RGB for matplotlib
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1254,6 +1281,7 @@ def main(
 
             for frame in frame_generator:
                 frame_count += 1
+                write_live_frame(live_frame_dir, frame, frame_count, live_frame_every)
                 current_time = time.time()
                 frame_time = current_time - frame_start_time
                 fps_buffer.append(frame_time)
@@ -1286,6 +1314,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=DEFAULT_DEVICE, choices=['cpu', 'cuda'], help='Device to run inference on')
     parser.add_argument('--mode', type=Mode, default=DEFAULT_MODE, help='Processing mode')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
+    parser.add_argument('--debug_output_dir', type=str, required=False, help='Directory for debug outputs from the web backend')
     parser.add_argument('--player_track_imgsz', type=int, default=DEFAULT_PLAYER_TRACK_IMGSZ, help='Player tracking image size for RADAR mode (match seg training imgsz)')
     parser.add_argument('--pitch_every_n_frames', type=int, default=DEFAULT_PITCH_EVERY_N_FRAMES, help='Run pitch detection every N frames (RADAR mode)')
     parser.add_argument('--ball_track_imgsz', type=int, default=DEFAULT_BALL_TRACK_IMGSZ, help='Ball tracking image size for RADAR mode')
@@ -1294,6 +1323,8 @@ if __name__ == '__main__':
     parser.add_argument('--ball_max_hold_frames', type=int, default=DEFAULT_BALL_MAX_HOLD_FRAMES, help='Keep last ball detection for N miss frames (RADAR mode)')
     parser.add_argument('--no_preview', action='store_true', help='Disable OpenCV preview windows')
     parser.add_argument('--structured_logs', action='store_true', help='Emit machine-readable progress events')
+    parser.add_argument('--live_frame_dir', type=str, required=False, help='Directory where the latest processed frame is published as latest.jpg')
+    parser.add_argument('--live_frame_every', type=int, default=1, help='Publish one live preview frame every N processed frames')
     args = parser.parse_args()
 
     print('Football Analysis System - BoT-SORT with GMC')
@@ -1335,6 +1366,9 @@ if __name__ == '__main__':
                     ball_max_hold_frames=args.ball_max_hold_frames,
                     preview=not args.no_preview,
                     structured_logs=args.structured_logs,
+                    debug_output_dir=args.debug_output_dir,
+                    live_frame_dir=args.live_frame_dir,
+                    live_frame_every=args.live_frame_every,
                 )
             except Exception as err:
                 print('Error', err)
@@ -1357,5 +1391,8 @@ if __name__ == '__main__':
             ball_max_hold_frames=args.ball_max_hold_frames,
             preview=not args.no_preview,
             structured_logs=args.structured_logs,
+            debug_output_dir=args.debug_output_dir,
+            live_frame_dir=args.live_frame_dir,
+            live_frame_every=args.live_frame_every,
         )
         

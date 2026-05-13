@@ -3,12 +3,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import web.backend.app as api
-from web.backend.config import MAIN_SEG_PATH
+from web.backend.config import MAIN_SEG_PATH, PYTHON_EXECUTABLE
 from web.backend.jobs import (
     JobManager,
     ProcessingParams,
     build_processing_command,
     parse_progress_line,
+    summarize_failure,
 )
 
 
@@ -35,11 +36,32 @@ def test_build_processing_command_includes_backend_flags(tmp_path):
 
     command = build_processing_command(job)
 
+    assert command[0] == str(PYTHON_EXECUTABLE)
     assert str(MAIN_SEG_PATH) in command
     assert "--no_preview" in command
     assert "--structured_logs" in command
     assert command[command.index("--mode") + 1] == "RADAR"
     assert command[command.index("--ball_track_conf") + 1] == "0.4"
+
+
+def test_build_processing_command_includes_live_frame_flags(tmp_path):
+    manager = JobManager()
+    live_dir = tmp_path / "live"
+    job = manager.create_job(
+        input_filename="clip.mp4",
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "output.mp4",
+        debug_output_dir=tmp_path / "debug",
+        params=ProcessingParams.from_raw(device="cpu"),
+        live_frame_dir=live_dir,
+        job_id="job-live",
+    )
+
+    command = build_processing_command(job)
+
+    assert command[command.index("--live_frame_dir") + 1] == str(live_dir)
+    assert command[command.index("--live_frame_every") + 1] == "1"
+    assert manager.snapshot(job.id)["live_stream_url"] == "/api/jobs/job-live/live-stream"
 
 
 def test_parse_structured_and_plain_progress_lines():
@@ -51,6 +73,16 @@ def test_parse_structured_and_plain_progress_lines():
     assert structured["progress"] == 0.25
     assert plain["processed_frames"] == 60
     assert plain["progress"] == 0.5
+
+
+def test_summarize_failure_prefers_python_exception():
+    logs = [
+        "Traceback (most recent call last):",
+        '  File "src/main_seg.py", line 11, in <module>',
+        "ModuleNotFoundError: No module named 'supervision'",
+    ]
+
+    assert summarize_failure(logs, "Processor exited with code 1") == "ModuleNotFoundError: No module named 'supervision'"
 
 
 def test_job_cancel_marks_request_and_terminates_process(tmp_path):
@@ -104,6 +136,7 @@ def test_create_job_stores_upload_and_queues_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "UPLOADS_DIR", tmp_path / "uploads")
     monkeypatch.setattr(api, "RESULTS_DIR", tmp_path / "results")
     monkeypatch.setattr(api, "missing_required_models", lambda: [])
+    monkeypatch.setattr(api, "processor_status", lambda: {"ready": True})
 
     client = TestClient(api.app)
     response = client.post(
@@ -119,3 +152,28 @@ def test_create_job_stores_upload_and_queues_runner(monkeypatch, tmp_path):
     assert Path(job.input_path).read_bytes() == b"video bytes"
     assert job.params.ball_track_conf == 0.35
     assert started_jobs == [job_id]
+
+
+def test_live_frame_endpoint_serves_latest_frame(monkeypatch, tmp_path):
+    manager = JobManager()
+    live_dir = tmp_path / "live"
+    live_dir.mkdir()
+    (live_dir / "latest.jpg").write_bytes(b"jpeg bytes")
+    job = manager.create_job(
+        input_filename="clip.mp4",
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "output.mp4",
+        debug_output_dir=tmp_path / "debug",
+        params=ProcessingParams(),
+        live_frame_dir=live_dir,
+        job_id="job-frame",
+    )
+
+    monkeypatch.setattr(api, "JOB_MANAGER", manager)
+
+    client = TestClient(api.app)
+    response = client.get(f"/api/jobs/{job.id}/live-frame")
+
+    assert response.status_code == 200
+    assert response.content == b"jpeg bytes"
+    assert response.headers["content-type"].startswith("image/jpeg")

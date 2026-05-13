@@ -18,6 +18,14 @@ Run the backend with the same Python environment used for inference. It must hav
 C:\VS-Projects\FootAR\FootAR_old\.venv\Scripts\python.exe -m web.backend
 ```
 
+The backend also auto-detects the known inference venv when it exists. To force a
+specific processor Python, set `FOOTAR_PYTHON` before starting the backend:
+
+```powershell
+$env:FOOTAR_PYTHON="C:\VS-Projects\FootAR\FootAR_old\.venv\Scripts\python.exe"
+python -m web.backend
+```
+
 From `player_detection/web/frontend/`:
 
 ```powershell
@@ -43,4 +51,6 @@ If any are missing, the UI disables processing and shows the missing paths.
 - `POST /api/jobs`
 - `GET /api/jobs/{job_id}`
 - `POST /api/jobs/{job_id}/cancel`
+- `GET /api/jobs/{job_id}/live-frame`
+- `GET /api/jobs/{job_id}/live-stream`
 - `GET /api/jobs/{job_id}/output`

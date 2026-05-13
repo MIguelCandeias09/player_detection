@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -20,6 +19,7 @@ from .config import (
     MAIN_SEG_PATH,
     MODES,
     PROJECT_ROOT,
+    PYTHON_EXECUTABLE,
 )
 
 
@@ -119,6 +119,7 @@ class JobRecord:
     debug_output_dir: Path
     params: ProcessingParams
     preview_path: Path | None = None
+    live_frame_dir: Path | None = None
     status: str = "queued"
     progress: float = 0.0
     processed_frames: int | None = None
@@ -135,6 +136,7 @@ class JobRecord:
         output_url = f"/api/jobs/{self.id}/output" if self.status == "succeeded" else None
         preview_ready = bool(self.preview_path and self.preview_path.exists())
         preview_url = f"/api/jobs/{self.id}/preview" if self.status == "succeeded" and preview_ready else output_url
+        live_enabled = self.live_frame_dir is not None
         return {
             "job_id": self.id,
             "input_filename": self.input_filename,
@@ -149,15 +151,22 @@ class JobRecord:
             "output_url": output_url,
             "preview_url": preview_url,
             "preview_ready": preview_ready,
+            "live_enabled": live_enabled,
+            "live_frame_url": f"/api/jobs/{self.id}/live-frame" if live_enabled else None,
+            "live_stream_url": f"/api/jobs/{self.id}/live-stream" if live_enabled else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+    @property
+    def live_frame_path(self) -> Path | None:
+        return self.live_frame_dir / "latest.jpg" if self.live_frame_dir is not None else None
 
 
 def build_processing_command(job: JobRecord) -> list[str]:
     params = job.params
     command = [
-        sys.executable,
+        str(PYTHON_EXECUTABLE),
         "-u",
         str(MAIN_SEG_PATH),
         "--source_video_path",
@@ -185,6 +194,15 @@ def build_processing_command(job: JobRecord) -> list[str]:
         "--no_preview",
         "--structured_logs",
     ]
+    if job.live_frame_dir is not None:
+        command.extend(
+            [
+                "--live_frame_dir",
+                str(job.live_frame_dir),
+                "--live_frame_every",
+                "1",
+            ]
+        )
     if params.debug:
         command.append("--debug")
     return command
@@ -212,6 +230,20 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
     }
 
 
+def summarize_failure(logs: list[str], fallback: str) -> str:
+    for line in reversed(logs):
+        clean = line.strip()
+        if not clean:
+            continue
+        if clean.startswith(("ModuleNotFoundError:", "ImportError:", "RuntimeError:", "ValueError:", "FileNotFoundError:")):
+            return clean
+    for line in reversed(logs):
+        clean = line.strip()
+        if clean and not clean.startswith(("File ", "Traceback ")):
+            return clean
+    return fallback
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
@@ -225,6 +257,7 @@ class JobManager:
         debug_output_dir: Path,
         params: ProcessingParams,
         preview_path: Path | None = None,
+        live_frame_dir: Path | None = None,
         job_id: str | None = None,
     ) -> JobRecord:
         job = JobRecord(
@@ -235,6 +268,7 @@ class JobManager:
             debug_output_dir=debug_output_dir,
             params=params,
             preview_path=preview_path or output_path.with_name("preview.mp4"),
+            live_frame_dir=live_frame_dir,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -379,6 +413,10 @@ class SubprocessJobRunner:
             message = f"Processor exited with code {return_code}"
             if return_code == 0 and not job.output_path.exists():
                 message = "Processor finished but did not create an output video"
+            else:
+                latest_job = self.manager.get(job_id)
+                if latest_job is not None:
+                    message = summarize_failure(latest_job.logs, message)
             self.manager.finish(job_id, "failed", return_code=return_code, error=message)
 
     def create_browser_preview(self, job: JobRecord) -> bool:
