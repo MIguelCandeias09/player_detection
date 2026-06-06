@@ -28,6 +28,8 @@ print('importing sports files')
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.common.ball import BallTracker, BallAnnotator
 from sports.distance_tracker import DistanceTracker
+from sports.possession_tracker import PossessionTracker
+from sports.heatmap_tracker import HeatmapTracker
 from sports.common.ball_interpolator import RealTimeBallInterpolator, InterpolatedBallAnnotator
 from sports.common.team_seg import TeamClassifierSeg
 from sports.common.view import ViewTransformer
@@ -697,6 +699,8 @@ def run_radar(
 
     frame_counter = 0
     distance_tracker = DistanceTracker(fps=video_info.fps)
+    possession_tracker = PossessionTracker(fps=video_info.fps)
+    heatmap_tracker = HeatmapTracker()
 
     # Buffer de dados para sincronização (players, keypoints, etc)
     # Como a bola tem delay de 30 frames, precisamos armazenar os outros dados também
@@ -921,6 +925,7 @@ def run_radar(
         sync_buffer.append({
             'frame': frame.copy(),
             'detections': detections_merged,
+            'team_ids': merged_team_ids,
             'color_lookup': color_lookup,
             'labels': labels,
             'keypoints': keypoints,
@@ -928,6 +933,7 @@ def run_radar(
         })
 
         distance_tracker.update(frame_counter, detections_merged, keypoints)
+        heatmap_tracker.update(frame_counter, detections_merged, keypoints, merged_team_ids)
 
         # 🎯 Add ball detection to interpolator (triggers interpolation)
         buffered_ball = ball_interpolator.add_frame(frame, balls)
@@ -936,6 +942,14 @@ def run_radar(
         if buffered_ball is not None and len(sync_buffer) == 30:
             # Get oldest frame data (synchronized with interpolated ball)
             oldest_data = sync_buffer[0]  # Don't pop yet, deque handles it automatically
+
+            possession_tracker.update(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                players_detections=oldest_data['detections'],
+                players_team_ids=oldest_data['team_ids'],
+                keypoints=oldest_data['keypoints'],
+            )
             
             # Render frame with interpolated ball
             annotated_frame = oldest_data['frame'].copy()
@@ -1036,6 +1050,14 @@ def run_radar(
     for i, buffered_ball in enumerate(remaining_balls):
         if i < len(sync_buffer):
             oldest_data = sync_buffer[i]
+
+            possession_tracker.update(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                players_detections=oldest_data['detections'],
+                players_team_ids=oldest_data['team_ids'],
+                keypoints=oldest_data['keypoints'],
+            )
             
             annotated_frame = oldest_data['frame'].copy()
             annotated_frame = ELLIPSE_ANNOTATOR.annotate(
@@ -1076,6 +1098,9 @@ def run_radar(
             yield annotated_frame
 
     distance_tracker.print_report()
+    possession_tracker.print_report()
+    heatmap_tracker.print_report()
+    heatmap_tracker.show()
 
 
 def main(
