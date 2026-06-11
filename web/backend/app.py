@@ -189,6 +189,26 @@ def safe_filename(filename: str | None) -> str:
     return candidate or "upload.mp4"
 
 
+def allowed_heatmap_files(stats_path: Path) -> set[str]:
+    try:
+        data = json.loads(stats_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    heatmaps = data.get("heatmaps") or {}
+    names: set[str] = set()
+    for key in ("global", "ball"):
+        if heatmaps.get(key):
+            names.add(heatmaps[key])
+    for value in (heatmaps.get("team") or {}).values():
+        if value:
+            names.add(value)
+    for player in heatmaps.get("players") or []:
+        if player.get("file"):
+            names.add(player["file"])
+    return names
+
+
 @app.get("/api/system")
 def get_system() -> dict[str, Any]:
     models = model_statuses()
@@ -264,8 +284,10 @@ async def create_job(
     upload_dir = UPLOADS_DIR / job_id
     result_dir = RESULTS_DIR / job_id
     debug_dir = result_dir / "debug"
+    stats_dir = result_dir / "stats"
     upload_dir.mkdir(parents=True, exist_ok=True)
     result_dir.mkdir(parents=True, exist_ok=True)
+    stats_dir.mkdir(parents=True, exist_ok=True)
 
     input_path = upload_dir / f"input{suffix}"
     output_path = result_dir / "output.mp4"
@@ -287,6 +309,7 @@ async def create_job(
         debug_output_dir=debug_dir,
         params=params,
         live_frame_dir=live_frame_dir,
+        stats_dir=stats_dir,
         job_id=job_id,
     )
 
@@ -318,6 +341,33 @@ def get_job_output(job_id: str) -> FileResponse:
     if job.status != "succeeded" or not job.output_path.exists():
         raise HTTPException(status_code=404, detail="Output video is not available")
     return FileResponse(job.output_path, media_type="video/mp4", filename=f"footar-{job_id}.mp4")
+
+
+@app.get("/api/jobs/{job_id}/stats")
+def get_job_stats(job_id: str) -> FileResponse:
+    job = JOB_MANAGER.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    stats_path = job.stats_json_path
+    if stats_path is None or not stats_path.exists():
+        raise HTTPException(status_code=404, detail="Statistics are not available")
+    return FileResponse(stats_path, media_type="application/json")
+
+
+@app.get("/api/jobs/{job_id}/heatmap/{name}")
+def get_job_heatmap(job_id: str, name: str) -> FileResponse:
+    job = JOB_MANAGER.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    stats_path = job.stats_json_path
+    if stats_path is None or not stats_path.exists():
+        raise HTTPException(status_code=404, detail="Statistics are not available")
+    if name not in allowed_heatmap_files(stats_path):
+        raise HTTPException(status_code=404, detail="Heatmap not found")
+    image_path = job.stats_dir / name
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Heatmap image is missing")
+    return FileResponse(image_path, media_type="image/png")
 
 
 @app.get("/api/jobs/{job_id}/preview")

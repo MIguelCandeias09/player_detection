@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from fastapi.testclient import TestClient
 
@@ -216,3 +217,78 @@ def test_snapshot_reports_stats_ready(tmp_path):
     snapshot = manager.snapshot("job-snap")
     assert snapshot["stats_ready"] is True
     assert snapshot["stats_url"] == "/api/jobs/job-snap/stats"
+
+
+def test_stats_endpoint_serves_json(monkeypatch, tmp_path):
+    manager = JobManager()
+    stats_dir = tmp_path / "stats"
+    stats_dir.mkdir()
+    (stats_dir / "stats.json").write_text('{"fps": 25.0, "players": []}', encoding="utf-8")
+    manager.create_job(
+        input_filename="c.mp4",
+        input_path=tmp_path / "i.mp4",
+        output_path=tmp_path / "o.mp4",
+        debug_output_dir=tmp_path / "d",
+        params=ProcessingParams(),
+        stats_dir=stats_dir,
+        job_id="job-st",
+    )
+    monkeypatch.setattr(api, "JOB_MANAGER", manager)
+
+    client = TestClient(api.app)
+    response = client.get("/api/jobs/job-st/stats")
+
+    assert response.status_code == 200
+    assert response.json()["fps"] == 25.0
+
+
+def test_stats_endpoint_404_without_file(monkeypatch, tmp_path):
+    manager = JobManager()
+    manager.create_job(
+        input_filename="c.mp4",
+        input_path=tmp_path / "i.mp4",
+        output_path=tmp_path / "o.mp4",
+        debug_output_dir=tmp_path / "d",
+        params=ProcessingParams(),
+        stats_dir=tmp_path / "stats",
+        job_id="job-no-stats",
+    )
+    monkeypatch.setattr(api, "JOB_MANAGER", manager)
+
+    client = TestClient(api.app)
+    assert client.get("/api/jobs/job-no-stats/stats").status_code == 404
+
+
+def test_heatmap_endpoint_validates_name(monkeypatch, tmp_path):
+    manager = JobManager()
+    stats_dir = tmp_path / "stats"
+    stats_dir.mkdir()
+    (stats_dir / "stats.json").write_text(
+        json.dumps({
+            "heatmaps": {
+                "global": "global.png", "ball": "ball.png",
+                "team": {"0": "team_0.png", "1": "team_1.png"}, "players": [],
+            }
+        }),
+        encoding="utf-8",
+    )
+    (stats_dir / "global.png").write_bytes(b"PNGDATA")
+    manager.create_job(
+        input_filename="c.mp4",
+        input_path=tmp_path / "i.mp4",
+        output_path=tmp_path / "o.mp4",
+        debug_output_dir=tmp_path / "d",
+        params=ProcessingParams(),
+        stats_dir=stats_dir,
+        job_id="job-hm",
+    )
+    monkeypatch.setattr(api, "JOB_MANAGER", manager)
+
+    client = TestClient(api.app)
+    ok = client.get("/api/jobs/job-hm/heatmap/global.png")
+    bad = client.get("/api/jobs/job-hm/heatmap/secret.txt")
+
+    assert ok.status_code == 200
+    assert ok.content == b"PNGDATA"
+    assert ok.headers["content-type"] == "image/png"
+    assert bad.status_code == 404
