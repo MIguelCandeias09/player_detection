@@ -950,7 +950,12 @@ def run_radar(
                 players_team_ids=oldest_data['team_ids'],
                 keypoints=oldest_data['keypoints'],
             )
-            
+            heatmap_tracker.update_ball(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                keypoints=oldest_data['keypoints'],
+            )
+
             # Render frame with interpolated ball
             annotated_frame = oldest_data['frame'].copy()
             annotated_frame = ELLIPSE_ANNOTATOR.annotate(
@@ -1058,7 +1063,12 @@ def run_radar(
                 players_team_ids=oldest_data['team_ids'],
                 keypoints=oldest_data['keypoints'],
             )
-            
+            heatmap_tracker.update_ball(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                keypoints=oldest_data['keypoints'],
+            )
+
             annotated_frame = oldest_data['frame'].copy()
             annotated_frame = ELLIPSE_ANNOTATOR.annotate(
                 annotated_frame, 

@@ -17,7 +17,13 @@ class HeatmapTracker:
 
     Espelha a logica do DistanceTracker: usa keypoints para construir um
     ViewTransformer e converter posicoes de pixel -> cm do campo. Acumula
-    presencas num grid 2D por equipa (0 e 1) e num grid global (todos).
+    presencas em grids 2D: por equipa (0 e 1), por jogador (tracker_id),
+    da bola e global (todos os jogadores).
+
+    API de selecao (para o frontend escolher que heatmap mostrar):
+        render_global(), render_team(0|1), render_player(tracker_id),
+        render_ball() -> imagem BGR do campo com o heatmap.
+        list_players() -> ids disponiveis ordenados por presenca.
     """
 
     # Resolucao do grid (colunas x linhas) sobre o campo (length x width).
@@ -40,13 +46,25 @@ class HeatmapTracker:
         self.grid_rows = grid_rows
         self.smooth_sigma = smooth_sigma
 
-        # grids[team] e grids global, indexados [linha (y/width), coluna (x/length)]
+        # grids[team], grid global, por jogador e bola,
+        # indexados [linha (y/width), coluna (x/length)]
         self._grids: dict = {
             0: np.zeros((grid_rows, grid_cols), dtype=np.float64),
             1: np.zeros((grid_rows, grid_cols), dtype=np.float64),
         }
         self._grid_all = np.zeros((grid_rows, grid_cols), dtype=np.float64)
+        self._grids_player: dict = defaultdict(
+            lambda: np.zeros((grid_rows, grid_cols), dtype=np.float64)
+        )
+        self._grid_ball = np.zeros((grid_rows, grid_cols), dtype=np.float64)
+
         self._samples: dict = defaultdict(int)
+        self._samples_player: dict = defaultdict(int)
+        self._samples_ball = 0
+        self._player_team: dict = {}
+        # A bola chega com delay (sync buffer) e tambem no flush final;
+        # evitar contar o mesmo frame duas vezes.
+        self._ball_seen_frames: set = set()
 
     # ------------------------------------------------------------------
     # API
@@ -90,6 +108,87 @@ class HeatmapTracker:
             self._grid_all[row, col] += 1.0
             self._samples[team] += 1
 
+            tracker_id = self._tracker_id_at(detections, i)
+            if tracker_id is not None:
+                self._grids_player[tracker_id][row, col] += 1.0
+                self._samples_player[tracker_id] += 1
+                self._player_team[tracker_id] = team
+
+    def update_ball(
+        self,
+        frame_index: int,
+        ball_xy_pixels,
+        keypoints: sv.KeyPoints,
+    ) -> None:
+        """Acumula a posicao da bola (em pixels) no grid da bola."""
+        if frame_index in self._ball_seen_frames:
+            return
+        self._ball_seen_frames.add(frame_index)
+
+        if ball_xy_pixels is None:
+            return
+
+        transformer = self._build_transformer(keypoints)
+        if transformer is None:
+            return
+
+        try:
+            ball_xy = np.asarray(ball_xy_pixels, dtype=np.float32).reshape(1, 2)
+            ball_pitch_cm = transformer.transform_points(points=ball_xy)
+        except Exception:
+            return
+
+        col, row = self._cell_index(ball_pitch_cm[0])
+        if col is None:
+            return
+
+        self._grid_ball[row, col] += 1.0
+        self._samples_ball += 1
+
+    # ------------------------------------------------------------------
+    # Selecao de heatmaps (interface para o frontend)
+    # ------------------------------------------------------------------
+
+    def render_global(self) -> np.ndarray:
+        """Heatmap de todos os jogadores combinados."""
+        return self.render(self._grid_all)
+
+    def render_team(self, team_id: int) -> np.ndarray:
+        """Heatmap de uma equipa (0 ou 1)."""
+        if team_id not in self._grids:
+            raise ValueError(f"team_id invalido: {team_id} (esperado 0 ou 1)")
+        return self.render(self._grids[team_id])
+
+    def render_player(self, tracker_id: int) -> np.ndarray:
+        """Heatmap de um jogador individual (tracker_id)."""
+        tracker_id = int(tracker_id)
+        if tracker_id not in self._grids_player:
+            return self.render(np.zeros((self.grid_rows, self.grid_cols)))
+        return self.render(self._grids_player[tracker_id])
+
+    def render_ball(self) -> np.ndarray:
+        """Heatmap da bola."""
+        return self.render(self._grid_ball)
+
+    def list_players(self) -> list:
+        """Jogadores com dados, ordenados por presenca (mais frames primeiro).
+
+        Devolve lista de dicts: {"tracker_id", "team", "samples"} — pronto a
+        serializar para o frontend popular o seletor de heatmaps.
+        """
+        ranked = sorted(
+            self._samples_player.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        return [
+            {
+                "tracker_id": tracker_id,
+                "team": self._player_team.get(tracker_id),
+                "samples": samples,
+            }
+            for tracker_id, samples in ranked
+        ]
+
     def print_report(self) -> None:
         """Imprime resumo de amostras recolhidas por equipa."""
         total = self._samples[0] + self._samples[1]
@@ -103,27 +202,32 @@ class HeatmapTracker:
         print(f"  Amostras Team 0: {self._samples[0]}")
         print(f"  Amostras Team 1: {self._samples[1]}")
         print(f"  Amostras totais: {total}")
+        print(f"  Amostras bola:   {self._samples_ball}")
+        print(f"  Jogadores com heatmap: {len(self._samples_player)}")
+        if self._samples_player:
+            print("-" * 50)
+            print("  Heatmaps individuais disponiveis (top 10):")
+            for entry in self.list_players()[:10]:
+                print(
+                    f"    ID {entry['tracker_id']} (T{entry['team']}): "
+                    f"{entry['samples']} amostras"
+                )
         print("=" * 50)
 
     def show(self, window_name: str = "Heatmaps") -> None:
-        """Gera os heatmaps (Team 0, Team 1, Global) e mostra-os numa janela."""
-        if self._samples[0] + self._samples[1] == 0:
+        """Mostra os heatmaps (Team 0, Team 1 / Todos, Bola) numa janela."""
+        if self._samples[0] + self._samples[1] + self._samples_ball == 0:
             print("[HeatmapTracker] Sem dados para mostrar heatmap.")
             return
 
-        panel_t0 = self._labeled_panel(self.render(self._grids[0]), "Team 0")
-        panel_t1 = self._labeled_panel(self.render(self._grids[1]), "Team 1")
-        panel_all = self._labeled_panel(self.render(self._grid_all), "Todos")
+        panel_t0 = self._labeled_panel(self.render_team(0), "Team 0")
+        panel_t1 = self._labeled_panel(self.render_team(1), "Team 1")
+        panel_all = self._labeled_panel(self.render_global(), "Todos")
+        panel_ball = self._labeled_panel(self.render_ball(), "Bola")
 
-        # Linha de cima: Team 0 e Team 1 lado a lado.
+        # Grelha 2x2: equipas em cima, Todos e Bola em baixo.
         top_row = np.hstack([panel_t0, panel_t1])
-        top_w = top_row.shape[1]
-
-        # Linha de baixo: "Todos" centrado na largura da linha de cima.
-        all_h, all_w = panel_all.shape[:2]
-        bottom_row = np.zeros((all_h, top_w, 3), dtype=np.uint8)
-        x_off = (top_w - all_w) // 2
-        bottom_row[:, x_off:x_off + all_w] = panel_all
+        bottom_row = np.hstack([panel_all, panel_ball])
 
         composite = np.vstack([top_row, bottom_row])
         composite = self._fit_to_window(composite)
@@ -176,6 +280,15 @@ class HeatmapTracker:
         col = min(max(col, 0), self.grid_cols - 1)
         row = min(max(row, 0), self.grid_rows - 1)
         return col, row
+
+    def _tracker_id_at(self, detections: sv.Detections, index: int) -> Optional[int]:
+        if detections.tracker_id is None:
+            return None
+
+        tracker_id = detections.tracker_id[index]
+        if tracker_id is None or int(tracker_id) == -1:
+            return None
+        return int(tracker_id)
 
     def _fit_to_window(self, image: np.ndarray) -> np.ndarray:
         """Reduz a imagem para a largura maxima da janela, mantendo o aspeto."""
