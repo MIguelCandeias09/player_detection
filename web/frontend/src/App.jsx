@@ -706,43 +706,51 @@ function StatsSection({ job }) {
 
         {stats ? (
           <>
-            <div className="possession-block">
+            <section className="stats-group">
+              <header className="stats-group-head">
+                <span className="eyebrow">Posse de bola</span>
+                <small>Bola solta · {possession?.loose_pct ?? 0}%</small>
+              </header>
               <div className="possession-bar">
-                <span className="poss-team team-a" style={{ width: `${team0}%` }}>
-                  A {team0}%
-                </span>
-                <span className="poss-team team-b" style={{ width: `${team1}%` }}>
-                  B {team1}%
-                </span>
+                <span className="poss-team team-a" style={{ width: `${team0}%` }} />
+                <span className="poss-team team-b" style={{ width: `${team1}%` }} />
               </div>
-              <small>Bola solta: {possession?.loose_pct ?? 0}%</small>
-            </div>
+              <div className="possession-legend">
+                <span className="team-tag team-a">Equipa A · {team0}%</span>
+                <span className="team-tag team-b">Equipa B · {team1}%</span>
+              </div>
+            </section>
 
-            <table className="stats-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Equipa</th>
-                  <th>Dist. (km)</th>
-                  <th>Vel. máx (km/h)</th>
-                  <th>Posse (s)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(stats.players || []).map((player) => (
-                  <tr key={player.tracker_id}>
-                    <td>{player.tracker_id}</td>
-                    <td>{teamLabel(player.team)}</td>
-                    <td>{player.distance_km}</td>
-                    <td>{player.max_speed_kmh}</td>
-                    <td>{player.possession_seconds}</td>
+            <section className="stats-group">
+              <span className="eyebrow">Jogadores</span>
+              <table className="stats-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Equipa</th>
+                    <th>Dist. (km)</th>
+                    <th>Vel. máx (km/h)</th>
+                    <th>Posse (s)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {(stats.players || []).map((player) => (
+                    <tr key={player.tracker_id}>
+                      <td>{player.tracker_id}</td>
+                      <td>{teamLabel(player.team)}</td>
+                      <td>{player.distance_km}</td>
+                      <td>{player.max_speed_kmh}</td>
+                      <td>{player.possession_seconds}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
 
-            <div className="heatmap-viewer">
+            <section className="stats-group">
+              <span className="eyebrow">Mapa de calor</span>
               <select
+                className="stats-select"
                 aria-label="Selecionar heatmap"
                 value={selected ? selected.key : "global"}
                 onChange={(event) => setHeatmap(event.target.value)}
@@ -756,7 +764,7 @@ function StatsSection({ job }) {
               {heatmapUrl ? (
                 <img className="heatmap-image" src={heatmapUrl} alt={`Heatmap ${selected.label}`} />
               ) : null}
-            </div>
+            </section>
           </>
         ) : (
           <p className="muted">A carregar estatísticas…</p>
