@@ -44,3 +44,33 @@ def test_distance_to_dict_sorted_by_tracker_id():
     assert [r["tracker_id"] for r in rows] == [3, 7]
     assert {"tracker_id": 7, "distance_km": 1.234, "max_speed_kmh": 28.4} in rows
     assert rows[0] == {"tracker_id": 3, "distance_km": 0.5, "max_speed_kmh": 0.0}
+
+
+import numpy as np
+
+from sports.heatmap_tracker import HeatmapTracker
+
+
+def test_heatmap_save_writes_pngs_and_manifest(tmp_path):
+    t = HeatmapTracker()
+    # Simula presencas: 1 jogador da equipa 0 com algumas amostras.
+    t._grid_all[10, 10] = 5.0
+    t._grids[0][10, 10] = 5.0
+    t._grids_player[7][10, 10] = 5.0
+    t._samples[0] = 5
+    t._samples_player[7] = 5
+    t._player_team[7] = 0
+
+    manifest = t.save_heatmaps(str(tmp_path))
+
+    assert (tmp_path / "global.png").exists()
+    assert (tmp_path / "ball.png").exists()
+    assert (tmp_path / "team_0.png").exists()
+    assert (tmp_path / "team_1.png").exists()
+    assert (tmp_path / "player_7.png").exists()
+    assert manifest["global"] == "global.png"
+    assert manifest["team"]["0"] == "team_0.png"
+    assert manifest["players"][0] == {
+        "tracker_id": 7, "team": 0, "samples": 5, "file": "player_7.png"
+    }
+    assert t.player_team_map() == {7: 0}
