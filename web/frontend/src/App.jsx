@@ -691,15 +691,17 @@ function StatsSection({ job }) {
   const heatmapUrl = selected ? `/api/jobs/${jobId}/heatmap/${selected.file}` : null;
 
   return (
-    <details className="panel stats-panel" data-testid="stats">
+    <details className="panel stats-panel readiness-details" data-testid="stats">
       <summary className="readiness-summary">
         <div>
           <h2>Estatísticas</h2>
         </div>
-        <ChevronDown className="summary-chevron" size={18} />
+        <div className="readiness-summary-state">
+          <ChevronDown className="summary-chevron" size={18} />
+        </div>
       </summary>
 
-      <div className="stats-body">
+      <div className="readiness-body">
         {error ? <p className="notice error">{localizeTechnicalText(error)}</p> : null}
 
         {stats ? (
