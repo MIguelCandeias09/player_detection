@@ -26,5 +26,9 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 
+# Bundled ffmpeg binary (browser preview H.264 conversion; portable fallback when
+# system ffmpeg is not on PATH)
+imageio-ffmpeg>=0.4.9
+
 # Utilities
 gdown>=4.7.0

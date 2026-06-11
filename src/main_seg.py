@@ -31,6 +31,7 @@ from sports.distance_tracker import DistanceTracker
 from sports.possession_tracker import PossessionTracker
 from sports.heatmap_tracker import HeatmapTracker
 from sports.stats_export import write_stats
+from sports.positions_export import PositionsRecorder, write_positions
 from sports.common.ball_interpolator import RealTimeBallInterpolator, InterpolatedBallAnnotator
 from sports.common.team_seg import TeamClassifierSeg
 from sports.common.view import ViewTransformer
@@ -705,6 +706,7 @@ def run_radar(
     distance_tracker = DistanceTracker(fps=video_info.fps)
     possession_tracker = PossessionTracker(fps=video_info.fps)
     heatmap_tracker = HeatmapTracker()
+    positions_recorder = PositionsRecorder(fps=video_info.fps)
 
     # Buffer de dados para sincronização (players, keypoints, etc)
     # Como a bola tem delay de 30 frames, precisamos armazenar os outros dados também
@@ -938,6 +940,7 @@ def run_radar(
 
         distance_tracker.update(frame_counter, detections_merged, keypoints)
         heatmap_tracker.update(frame_counter, detections_merged, keypoints, merged_team_ids)
+        positions_recorder.update(frame_counter, detections_merged, keypoints, merged_team_ids)
 
         # 🎯 Add ball detection to interpolator (triggers interpolation)
         buffered_ball = ball_interpolator.add_frame(frame, balls)
@@ -955,6 +958,11 @@ def run_radar(
                 keypoints=oldest_data['keypoints'],
             )
             heatmap_tracker.update_ball(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                keypoints=oldest_data['keypoints'],
+            )
+            positions_recorder.update_ball(
                 frame_index=oldest_data['frame_counter'],
                 ball_xy_pixels=buffered_ball.detection,
                 keypoints=oldest_data['keypoints'],
@@ -1072,6 +1080,11 @@ def run_radar(
                 ball_xy_pixels=buffered_ball.detection,
                 keypoints=oldest_data['keypoints'],
             )
+            positions_recorder.update_ball(
+                frame_index=oldest_data['frame_counter'],
+                ball_xy_pixels=buffered_ball.detection,
+                keypoints=oldest_data['keypoints'],
+            )
 
             annotated_frame = oldest_data['frame'].copy()
             annotated_frame = ELLIPSE_ANNOTATOR.annotate(
@@ -1126,6 +1139,9 @@ def run_radar(
             )
             if saved:
                 emit_structured_event(structured_logs, 'stats', path='stats.json')
+            saved_positions = write_positions(stats_output_dir, positions_recorder)
+            if saved_positions:
+                emit_structured_event(structured_logs, 'positions', path='positions.json')
         except Exception as exc:
             print(f'[stats] Falha a exportar estatisticas: {exc}')
 

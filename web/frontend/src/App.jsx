@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -22,6 +22,9 @@ import {
 } from "lucide-react";
 import { cancelJob, createJob, fetchJob, fetchStats, fetchSystem } from "./api.js";
 import CustomSelect from "./CustomSelect.jsx";
+
+// Carregado sob demanda: evita puxar three.js até o utilizador abrir a vista 3D
+const Match3DPanel = lazy(() => import("./Match3DViewer.jsx"));
 
 const FALLBACK_DEFAULTS = {
   mode: "RADAR",
@@ -793,6 +796,12 @@ export function StatusPanel({ job, onCancel }) {
   const liveStreamUrl = job?.live_stream_url;
   const complete = job?.status === "succeeded";
   const showLiveStream = Boolean(job?.live_enabled && liveStreamUrl && running);
+  const positionsReady = Boolean(complete && job?.positions_ready);
+  const [show3d, setShow3d] = useState(false);
+
+  useEffect(() => {
+    setShow3d(false);
+  }, [job?.job_id]);
 
   return (
     <section className="panel status-panel">
@@ -844,14 +853,37 @@ export function StatusPanel({ job, onCancel }) {
 
       {outputUrl ? (
         <div className="output-block">
-          <video controls preload="metadata" key={previewUrl}>
-            <source src={previewUrl} type="video/mp4" />
-          </video>
+          {show3d && positionsReady ? (
+            <Suspense
+              fallback={
+                <div className="match3d-loading">
+                  <Loader2 className="spin" size={20} />
+                  <span>A carregar o motor 3D…</span>
+                </div>
+              }
+            >
+              <Match3DPanel jobId={job.job_id} />
+            </Suspense>
+          ) : (
+            <video controls preload="metadata" key={previewUrl}>
+              <source src={previewUrl} type="video/mp4" />
+            </video>
+          )}
           <div className="output-actions">
             <a className="primary-button" href={outputUrl}>
               <Download size={18} />
               Descarregar
             </a>
+            {positionsReady ? (
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setShow3d((value) => !value)}
+              >
+                {show3d ? <FileVideo size={18} /> : <Layers3 size={18} />}
+                {show3d ? "Vídeo Processado" : "Visualização 3D"}
+              </button>
+            ) : null}
             {previewUrl !== outputUrl ? (
               <a className="ghost-button" href={previewUrl} target="_blank" rel="noreferrer">
                 Abrir pré-visualização

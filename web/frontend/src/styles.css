@@ -1839,3 +1839,119 @@ select:focus-visible {
   border-radius: var(--radius);
   background: var(--media-bg);
 }
+
+/* ----- Visualização 3D (Replay estilo Football Manager) ----- */
+
+.match3d-viewer {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.match3d-canvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #0c1626;
+}
+
+.match3d-canvas canvas {
+  display: block;
+}
+
+.match3d-presets {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 6px;
+}
+
+.match3d-preset {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #e8f1fb;
+  background: rgba(10, 20, 35, 0.66);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.match3d-preset:hover {
+  background: rgba(34, 60, 95, 0.8);
+}
+
+.match3d-preset.active {
+  border-color: var(--accent);
+  background: rgba(86, 167, 223, 0.28);
+}
+
+.match3d-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.match3d-play,
+.match3d-speed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel-soft, transparent);
+  color: var(--ink);
+  font-weight: 900;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.match3d-play:hover,
+.match3d-speed:hover {
+  border-color: var(--accent);
+}
+
+.match3d-speed {
+  font-size: 12px;
+  padding: 0 10px;
+}
+
+.match3d-time {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  min-width: 36px;
+  text-align: center;
+}
+
+.match3d-controls input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.match3d-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  margin-top: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--media-bg);
+  color: var(--muted);
+  font-weight: 700;
+}

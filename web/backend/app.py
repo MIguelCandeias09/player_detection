@@ -354,6 +354,17 @@ def get_job_stats(job_id: str) -> FileResponse:
     return FileResponse(stats_path, media_type="application/json")
 
 
+@app.get("/api/jobs/{job_id}/positions")
+def get_job_positions(job_id: str) -> FileResponse:
+    job = JOB_MANAGER.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    positions_path = job.positions_json_path
+    if positions_path is None or not positions_path.exists():
+        raise HTTPException(status_code=404, detail="Positions are not available")
+    return FileResponse(positions_path, media_type="application/json")
+
+
 @app.get("/api/jobs/{job_id}/heatmap/{name}")
 def get_job_heatmap(job_id: str, name: str) -> FileResponse:
     job = JOB_MANAGER.get(job_id)

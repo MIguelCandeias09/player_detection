@@ -139,6 +139,7 @@ class JobRecord:
         preview_url = f"/api/jobs/{self.id}/preview" if self.status == "succeeded" and preview_ready else output_url
         live_enabled = self.live_frame_dir is not None
         stats_ready = bool(self.stats_json_path and self.stats_json_path.exists())
+        positions_ready = bool(self.positions_json_path and self.positions_json_path.exists())
         return {
             "job_id": self.id,
             "input_filename": self.input_filename,
@@ -158,6 +159,8 @@ class JobRecord:
             "live_stream_url": f"/api/jobs/{self.id}/live-stream" if live_enabled else None,
             "stats_ready": stats_ready,
             "stats_url": f"/api/jobs/{self.id}/stats" if stats_ready else None,
+            "positions_ready": positions_ready,
+            "positions_url": f"/api/jobs/{self.id}/positions" if positions_ready else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -169,6 +172,10 @@ class JobRecord:
     @property
     def stats_json_path(self) -> Path | None:
         return self.stats_dir / "stats.json" if self.stats_dir is not None else None
+
+    @property
+    def positions_json_path(self) -> Path | None:
+        return self.stats_dir / "positions.json" if self.stats_dir is not None else None
 
 
 def build_processing_command(job: JobRecord) -> list[str]:
@@ -435,6 +442,15 @@ class SubprocessJobRunner:
         if job.preview_path is None:
             return False
         ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            # Fall back to the ffmpeg binary bundled with imageio-ffmpeg so the
+            # browser preview works on any machine without a system ffmpeg.
+            try:
+                import imageio_ffmpeg
+
+                ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            except Exception:
+                ffmpeg = None
         if not ffmpeg:
             self.manager.append_log(job.id, "ffmpeg not found; using original output for preview")
             return False
