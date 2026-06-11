@@ -172,4 +172,58 @@ describe("FootAR frontend", () => {
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "light"));
     expect(screen.getByRole("button", { name: /Ativar tema escuro/i })).toBeInTheDocument();
   });
+
+  it("renders the statistics section when the job has stats", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        fps: 25,
+        possession: {
+          frames_analyzed: 100,
+          loose_pct: 10,
+          team: { "0": { pct: 64 }, "1": { pct: 36 } },
+          top_players: []
+        },
+        players: [
+          { tracker_id: 7, team: 0, distance_km: 1.23, max_speed_kmh: 28.4, possession_seconds: 42.1 }
+        ],
+        heatmaps: {
+          global: "global.png",
+          ball: "ball.png",
+          team: { "0": "team_0.png", "1": "team_1.png" },
+          players: [{ tracker_id: 7, team: 0, samples: 10, file: "player_7.png" }]
+        }
+      })
+    });
+
+    render(
+      <StatusPanel
+        job={{
+          job_id: "job-9",
+          status: "succeeded",
+          progress: 1,
+          processed_frames: 100,
+          total_frames: 100,
+          output_url: "/api/jobs/job-9/output",
+          stats_ready: true,
+          stats_url: "/api/jobs/job-9/stats",
+          logs: []
+        }}
+        onCancel={() => {}}
+      />
+    );
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith("/api/jobs/job-9/stats"));
+
+    expect(await screen.findByText(/64%/)).toBeInTheDocument();
+    expect(screen.getByText("1.23")).toBeInTheDocument();
+    // "Equipa A" aparece na celula da tabela E na opcao do seletor -> getAllByText.
+    expect(screen.getAllByText("Equipa A").length).toBeGreaterThan(0);
+
+    const image = screen.getByAltText(/Heatmap/i);
+    expect(image).toHaveAttribute("src", "/api/jobs/job-9/heatmap/global.png");
+
+    fireEvent.change(screen.getByLabelText("Selecionar heatmap"), { target: { value: "team1" } });
+    expect(screen.getByAltText(/Heatmap/i)).toHaveAttribute("src", "/api/jobs/job-9/heatmap/team_1.png");
+  });
 });

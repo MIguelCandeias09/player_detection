@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 from typing import Optional
 
@@ -188,6 +189,41 @@ class HeatmapTracker:
             }
             for tracker_id, samples in ranked
         ]
+
+    def player_team_map(self) -> dict:
+        """Mapa tracker_id -> equipa, para juntar a tabela de jogadores."""
+        return dict(self._player_team)
+
+    def save_heatmaps(self, out_dir: str) -> dict:
+        """Renderiza e grava os PNGs dos heatmaps; devolve o manifesto.
+
+        Escreve sempre os agregados (global, bola, equipa 0/1) e um PNG por
+        jogador com amostras. Devolve o bloco "heatmaps" do stats.json.
+        """
+        os.makedirs(out_dir, exist_ok=True)
+
+        cv2.imwrite(os.path.join(out_dir, "global.png"), self.render_global())
+        cv2.imwrite(os.path.join(out_dir, "ball.png"), self.render_ball())
+        cv2.imwrite(os.path.join(out_dir, "team_0.png"), self.render_team(0))
+        cv2.imwrite(os.path.join(out_dir, "team_1.png"), self.render_team(1))
+
+        manifest = {
+            "global": "global.png",
+            "ball": "ball.png",
+            "team": {"0": "team_0.png", "1": "team_1.png"},
+            "players": [],
+        }
+        for entry in self.list_players():
+            tracker_id = entry["tracker_id"]
+            filename = f"player_{tracker_id}.png"
+            cv2.imwrite(os.path.join(out_dir, filename), self.render_player(tracker_id))
+            manifest["players"].append({
+                "tracker_id": tracker_id,
+                "team": entry["team"],
+                "samples": entry["samples"],
+                "file": filename,
+            })
+        return manifest
 
     def print_report(self) -> None:
         """Imprime resumo de amostras recolhidas por equipa."""

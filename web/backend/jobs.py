@@ -120,6 +120,7 @@ class JobRecord:
     params: ProcessingParams
     preview_path: Path | None = None
     live_frame_dir: Path | None = None
+    stats_dir: Path | None = None
     status: str = "queued"
     progress: float = 0.0
     processed_frames: int | None = None
@@ -137,6 +138,7 @@ class JobRecord:
         preview_ready = bool(self.preview_path and self.preview_path.exists())
         preview_url = f"/api/jobs/{self.id}/preview" if self.status == "succeeded" and preview_ready else output_url
         live_enabled = self.live_frame_dir is not None
+        stats_ready = bool(self.stats_json_path and self.stats_json_path.exists())
         return {
             "job_id": self.id,
             "input_filename": self.input_filename,
@@ -154,6 +156,8 @@ class JobRecord:
             "live_enabled": live_enabled,
             "live_frame_url": f"/api/jobs/{self.id}/live-frame" if live_enabled else None,
             "live_stream_url": f"/api/jobs/{self.id}/live-stream" if live_enabled else None,
+            "stats_ready": stats_ready,
+            "stats_url": f"/api/jobs/{self.id}/stats" if stats_ready else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -161,6 +165,10 @@ class JobRecord:
     @property
     def live_frame_path(self) -> Path | None:
         return self.live_frame_dir / "latest.jpg" if self.live_frame_dir is not None else None
+
+    @property
+    def stats_json_path(self) -> Path | None:
+        return self.stats_dir / "stats.json" if self.stats_dir is not None else None
 
 
 def build_processing_command(job: JobRecord) -> list[str]:
@@ -203,6 +211,8 @@ def build_processing_command(job: JobRecord) -> list[str]:
                 "1",
             ]
         )
+    if job.stats_dir is not None:
+        command.extend(["--stats_output_dir", str(job.stats_dir)])
     if params.debug:
         command.append("--debug")
     return command
@@ -258,6 +268,7 @@ class JobManager:
         params: ProcessingParams,
         preview_path: Path | None = None,
         live_frame_dir: Path | None = None,
+        stats_dir: Path | None = None,
         job_id: str | None = None,
     ) -> JobRecord:
         job = JobRecord(
@@ -269,6 +280,7 @@ class JobManager:
             params=params,
             preview_path=preview_path or output_path.with_name("preview.mp4"),
             live_frame_dir=live_frame_dir,
+            stats_dir=stats_dir,
         )
         with self._lock:
             self._jobs[job.id] = job
