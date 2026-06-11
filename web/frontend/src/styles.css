@@ -1075,6 +1075,100 @@ select:focus-visible {
   border-color: var(--line-strong);
 }
 
+.custom-select {
+  position: relative;
+  width: 100%;
+}
+
+.custom-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--input-bg);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.custom-select-trigger:hover {
+  border-color: var(--line-strong);
+}
+
+.custom-select.open .custom-select-trigger {
+  border-color: var(--accent);
+}
+
+.custom-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.custom-select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select-chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform 180ms ease;
+}
+
+.custom-select.open .custom-select-chevron {
+  transform: rotate(180deg);
+}
+
+.custom-select-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 264px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  box-shadow: var(--shadow);
+  animation: reveal-controls 140ms ease-out;
+}
+
+.custom-select-option {
+  padding: 9px 11px;
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.custom-select-option:hover {
+  background: var(--ghost-bg);
+}
+
+.custom-select-option.active {
+  color: var(--accent);
+  background: rgba(86, 167, 223, 0.12);
+}
+
+.custom-select-option.disabled {
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .range-pair {
   gap: 8px;
 }
@@ -1736,20 +1830,6 @@ select:focus-visible {
 
 .stats-table tbody tr:last-child td {
   border-bottom: 0;
-}
-
-.stats-select {
-  width: 100%;
-  min-height: 44px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0 11px;
-  color: var(--ink);
-  background: var(--input-bg);
-}
-
-.stats-select:hover {
-  border-color: var(--line-strong);
 }
 
 .heatmap-image {

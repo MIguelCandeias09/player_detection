@@ -21,6 +21,7 @@ import {
   Upload
 } from "lucide-react";
 import { cancelJob, createJob, fetchJob, fetchStats, fetchSystem } from "./api.js";
+import CustomSelect from "./CustomSelect.jsx";
 
 const FALLBACK_DEFAULTS = {
   mode: "RADAR",
@@ -360,6 +361,21 @@ function Field({ label, children }) {
   );
 }
 
+function SelectField({ label, value, options, onChange, disabled }) {
+  return (
+    <div className="field">
+      <span>{label}</span>
+      <CustomSelect
+        ariaLabel={label}
+        value={value}
+        options={options}
+        onChange={onChange}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 function MetricPill({ icon, label, value, tone = "neutral" }) {
   return (
     <div className={`metric-pill ${tone}`}>
@@ -420,15 +436,16 @@ function NumberField({ label, value, min, max, step = 1, onChange }) {
 function AdvancedControls({ params, devices, system, updateParam }) {
   return (
     <div className="advanced-controls">
-      <Field label="Dispositivo">
-        <select value={params.device} onChange={(event) => updateParam("device", event.target.value)}>
-          {devices.map((device) => (
-            <option value={device} key={device} disabled={device === "cuda" && system && !system.cuda?.available}>
-              {device}
-            </option>
-          ))}
-        </select>
-      </Field>
+      <SelectField
+        label="Dispositivo"
+        value={params.device}
+        onChange={(value) => updateParam("device", value)}
+        options={devices.map((device) => ({
+          value: device,
+          label: device,
+          disabled: device === "cuda" && system && !system.cuda?.available
+        }))}
+      />
 
       <NumberField
         label="Resolução dos jogadores"
@@ -749,18 +766,12 @@ function StatsSection({ job }) {
 
             <section className="stats-group">
               <span className="eyebrow">Mapa de calor</span>
-              <select
-                className="stats-select"
-                aria-label="Selecionar heatmap"
+              <CustomSelect
+                ariaLabel="Selecionar heatmap"
                 value={selected ? selected.key : "global"}
-                onChange={(event) => setHeatmap(event.target.value)}
-              >
-                {heatmapOptions.map((option) => (
-                  <option value={option.key} key={option.key}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setHeatmap(value)}
+                options={heatmapOptions.map((option) => ({ value: option.key, label: option.label }))}
+              />
               {heatmapUrl ? (
                 <img className="heatmap-image" src={heatmapUrl} alt={`Heatmap ${selected.label}`} />
               ) : null}
@@ -1127,15 +1138,12 @@ export default function App() {
             </div>
 
             <div className="control-grid">
-              <Field label="Modo">
-                <select value={params.mode} onChange={(event) => updateParam("mode", event.target.value)}>
-                  {modes.map((mode) => (
-                    <option value={mode} key={mode}>
-                      {MODE_LABELS[mode] || mode}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              <SelectField
+                label="Modo"
+                value={params.mode}
+                onChange={(value) => updateParam("mode", value)}
+                options={modes.map((mode) => ({ value: mode, label: MODE_LABELS[mode] || mode }))}
+              />
             </div>
           </section>
         </section>

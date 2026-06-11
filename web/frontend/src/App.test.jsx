@@ -217,13 +217,14 @@ describe("FootAR frontend", () => {
 
     expect(await screen.findByText(/64%/)).toBeInTheDocument();
     expect(screen.getByText("1.23")).toBeInTheDocument();
-    // "Equipa A" aparece na celula da tabela E na opcao do seletor -> getAllByText.
     expect(screen.getAllByText("Equipa A").length).toBeGreaterThan(0);
 
     const image = screen.getByAltText(/Heatmap/i);
     expect(image).toHaveAttribute("src", "/api/jobs/job-9/heatmap/global.png");
 
-    fireEvent.change(screen.getByLabelText("Selecionar heatmap"), { target: { value: "team1" } });
+    // Dropdown custom: abrir e escolher a opcao "Equipa B".
+    fireEvent.click(screen.getByRole("button", { name: "Selecionar heatmap" }));
+    fireEvent.click(screen.getByRole("option", { name: "Equipa B" }));
     expect(screen.getByAltText(/Heatmap/i)).toHaveAttribute("src", "/api/jobs/job-9/heatmap/team_1.png");
   });
 });
