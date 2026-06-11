@@ -42,3 +42,11 @@ export async function cancelJob(jobId) {
   }
   return response.json();
 }
+
+export async function fetchStats(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}/stats`);
+  if (!response.ok) {
+    throw new Error("Nao foi possivel obter as estatisticas");
+  }
+  return response.json();
+}
