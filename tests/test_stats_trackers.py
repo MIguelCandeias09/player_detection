@@ -31,3 +31,16 @@ def test_possession_player_seconds_uses_fps():
     t._frames_player[9] = 5
 
     assert t.player_seconds() == {7: 3.0, 9: 0.5}
+
+
+def test_distance_to_dict_sorted_by_tracker_id():
+    t = DistanceTracker(fps=25.0)
+    t._total_distance_m[7] = 1234.0
+    t._max_speed_kmh[7] = 28.44
+    t._total_distance_m[3] = 500.0
+
+    rows = t.to_dict()
+
+    assert [r["tracker_id"] for r in rows] == [3, 7]
+    assert {"tracker_id": 7, "distance_km": 1.234, "max_speed_kmh": 28.4} in rows
+    assert rows[0] == {"tracker_id": 3, "distance_km": 0.5, "max_speed_kmh": 0.0}

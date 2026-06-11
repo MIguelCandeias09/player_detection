@@ -92,6 +92,17 @@ class DistanceTracker:
             print(f"  {tid:>4}  {dist_km:>14.3f}  {speed:>15.1f}")
         print("=" * 50)
 
+    def to_dict(self) -> list:
+        """Serializa distancia/velocidade por tracker_id (frontend web)."""
+        rows = []
+        for tid in sorted(self._total_distance_m.keys()):
+            rows.append({
+                "tracker_id": tid,
+                "distance_km": round(self._total_distance_m[tid] / 1000.0, 3),
+                "max_speed_kmh": round(self._max_speed_kmh.get(tid, 0.0), 1),
+            })
+        return rows
+
     # ------------------------------------------------------------------
     # Internos
     # ------------------------------------------------------------------
