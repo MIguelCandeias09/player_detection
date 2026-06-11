@@ -177,3 +177,42 @@ def test_live_frame_endpoint_serves_latest_frame(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.content == b"jpeg bytes"
     assert response.headers["content-type"].startswith("image/jpeg")
+
+
+def test_build_processing_command_includes_stats_dir(tmp_path):
+    manager = JobManager()
+    stats_dir = tmp_path / "stats"
+    job = manager.create_job(
+        input_filename="clip.mp4",
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "output.mp4",
+        debug_output_dir=tmp_path / "debug",
+        params=ProcessingParams.from_raw(device="cpu"),
+        stats_dir=stats_dir,
+        job_id="job-stats",
+    )
+
+    command = build_processing_command(job)
+
+    assert command[command.index("--stats_output_dir") + 1] == str(stats_dir)
+
+
+def test_snapshot_reports_stats_ready(tmp_path):
+    manager = JobManager()
+    stats_dir = tmp_path / "stats"
+    stats_dir.mkdir()
+    (stats_dir / "stats.json").write_text('{"fps": 25.0, "players": []}', encoding="utf-8")
+    job = manager.create_job(
+        input_filename="clip.mp4",
+        input_path=tmp_path / "input.mp4",
+        output_path=tmp_path / "output.mp4",
+        debug_output_dir=tmp_path / "debug",
+        params=ProcessingParams(),
+        stats_dir=stats_dir,
+        job_id="job-snap",
+    )
+    job.status = "succeeded"
+
+    snapshot = manager.snapshot("job-snap")
+    assert snapshot["stats_ready"] is True
+    assert snapshot["stats_url"] == "/api/jobs/job-snap/stats"
