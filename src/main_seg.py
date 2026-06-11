@@ -30,6 +30,7 @@ from sports.common.ball import BallTracker, BallAnnotator
 from sports.distance_tracker import DistanceTracker
 from sports.possession_tracker import PossessionTracker
 from sports.heatmap_tracker import HeatmapTracker
+from sports.stats_export import write_stats
 from sports.common.ball_interpolator import RealTimeBallInterpolator, InterpolatedBallAnnotator
 from sports.common.team_seg import TeamClassifierSeg
 from sports.common.view import ViewTransformer
@@ -634,6 +635,9 @@ def run_radar(
     ball_track_every_n_frames: int = DEFAULT_BALL_TRACK_EVERY_N_FRAMES,
     ball_track_conf: float = DEFAULT_BALL_TRACK_CONF,
     ball_max_hold_frames: int = DEFAULT_BALL_MAX_HOLD_FRAMES,
+    stats_output_dir: str = None,
+    headless: bool = False,
+    structured_logs: bool = False,
 ) -> Iterator[np.ndarray]:
     print('run_radar')
     performanceMeter()
@@ -1110,7 +1114,23 @@ def run_radar(
     distance_tracker.print_report()
     possession_tracker.print_report()
     heatmap_tracker.print_report()
-    heatmap_tracker.show()
+
+    if stats_output_dir:
+        try:
+            saved = write_stats(
+                stats_output_dir,
+                video_info.fps,
+                possession_tracker,
+                distance_tracker,
+                heatmap_tracker,
+            )
+            if saved:
+                emit_structured_event(structured_logs, 'stats', path='stats.json')
+        except Exception as exc:
+            print(f'[stats] Falha a exportar estatisticas: {exc}')
+
+    if not headless:
+        heatmap_tracker.show()
 
 
 def main(
@@ -1128,6 +1148,7 @@ def main(
     preview: bool = True,
     structured_logs: bool = False,
     debug_output_dir: str = None,
+    stats_output_dir: str = None,
     live_frame_dir: str = None,
     live_frame_every: int = 1,
 ) -> None:
@@ -1155,6 +1176,9 @@ def main(
             ball_track_every_n_frames=ball_track_every_n_frames,
             ball_track_conf=ball_track_conf,
             ball_max_hold_frames=ball_max_hold_frames,
+            stats_output_dir=stats_output_dir,
+            headless=not preview,
+            structured_logs=structured_logs,
         )
     else:
         raise NotImplementedError(f"Mode {mode} is not implemented.")
@@ -1350,6 +1374,7 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=Mode, default=DEFAULT_MODE, help='Processing mode')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (saves visualization images)')
     parser.add_argument('--debug_output_dir', type=str, required=False, help='Directory for debug outputs from the web backend')
+    parser.add_argument('--stats_output_dir', type=str, required=False, help='Directory for stats.json and heatmap PNGs')
     parser.add_argument('--player_track_imgsz', type=int, default=DEFAULT_PLAYER_TRACK_IMGSZ, help='Player tracking image size for RADAR mode (match seg training imgsz)')
     parser.add_argument('--pitch_every_n_frames', type=int, default=DEFAULT_PITCH_EVERY_N_FRAMES, help='Run pitch detection every N frames (RADAR mode)')
     parser.add_argument('--ball_track_imgsz', type=int, default=DEFAULT_BALL_TRACK_IMGSZ, help='Ball tracking image size for RADAR mode')
@@ -1402,6 +1427,7 @@ if __name__ == '__main__':
                     preview=not args.no_preview,
                     structured_logs=args.structured_logs,
                     debug_output_dir=args.debug_output_dir,
+                    stats_output_dir=args.stats_output_dir,
                     live_frame_dir=args.live_frame_dir,
                     live_frame_every=args.live_frame_every,
                 )
@@ -1427,6 +1453,7 @@ if __name__ == '__main__':
             preview=not args.no_preview,
             structured_logs=args.structured_logs,
             debug_output_dir=args.debug_output_dir,
+            stats_output_dir=args.stats_output_dir,
             live_frame_dir=args.live_frame_dir,
             live_frame_every=args.live_frame_every,
         )
