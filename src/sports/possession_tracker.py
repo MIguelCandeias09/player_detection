@@ -160,6 +160,40 @@ class PossessionTracker:
                 print(f"ID {tracker_id} (T{team_id}): {seconds:.1f}s")
         print("=" * 50)
 
+    def to_dict(self) -> dict:
+        """Serializa o relatorio de posse para JSON (frontend web)."""
+        top_players = []
+        if self._frames_player:
+            ranked = sorted(
+                self._frames_player.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:5]
+            for tracker_id, frames in ranked:
+                seconds = frames / self.fps if self.fps else 0.0
+                top_players.append({
+                    "tracker_id": tracker_id,
+                    "team": self._player_team.get(tracker_id),
+                    "seconds": round(seconds, 1),
+                })
+        return {
+            "frames_analyzed": self._total_frames,
+            "loose_pct": round(self._pct(self._loose_frames), 1),
+            "team": {
+                "0": {"pct": round(self._possession_pct(self._frames_team[0]), 1)},
+                "1": {"pct": round(self._possession_pct(self._frames_team[1]), 1)},
+            },
+            "top_players": top_players,
+        }
+
+    def player_seconds(self) -> dict:
+        """Tempo (s) com bola por tracker_id, para juntar a tabela de jogadores."""
+        if not self.fps:
+            return {tracker_id: 0.0 for tracker_id in self._frames_player}
+        return {
+            tracker_id: frames / self.fps
+            for tracker_id, frames in self._frames_player.items()
+        }
+
     def _record_frame(
         self,
         candidate_team: Optional[int],
