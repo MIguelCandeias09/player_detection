@@ -292,3 +292,38 @@ def test_heatmap_endpoint_validates_name(monkeypatch, tmp_path):
     assert ok.content == b"PNGDATA"
     assert ok.headers["content-type"] == "image/png"
     assert bad.status_code == 404
+
+
+def test_heatmap_endpoint_blocks_traversal_in_manifest(monkeypatch, tmp_path):
+    manager = JobManager()
+    stats_dir = tmp_path / "stats"
+    stats_dir.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"TOPSECRET")
+    # Manifest deliberately references a traversal value: it passes the whitelist,
+    # so it must be blocked by the path-containment guard instead.
+    (stats_dir / "stats.json").write_text(
+        json.dumps({
+            "heatmaps": {
+                "global": "..\\secret.txt", "ball": "ball.png",
+                "team": {}, "players": [],
+            }
+        }),
+        encoding="utf-8",
+    )
+    manager.create_job(
+        input_filename="c.mp4",
+        input_path=tmp_path / "i.mp4",
+        output_path=tmp_path / "o.mp4",
+        debug_output_dir=tmp_path / "d",
+        params=ProcessingParams(),
+        stats_dir=stats_dir,
+        job_id="job-trav",
+    )
+    monkeypatch.setattr(api, "JOB_MANAGER", manager)
+
+    client = TestClient(api.app)
+    response = client.get("/api/jobs/job-trav/heatmap/..\\secret.txt")
+
+    assert response.status_code == 404
+    assert response.content != b"TOPSECRET"

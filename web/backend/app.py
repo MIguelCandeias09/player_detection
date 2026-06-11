@@ -365,6 +365,8 @@ def get_job_heatmap(job_id: str, name: str) -> FileResponse:
     if name not in allowed_heatmap_files(stats_path):
         raise HTTPException(status_code=404, detail="Heatmap not found")
     image_path = job.stats_dir / name
+    if not image_path.resolve().is_relative_to(job.stats_dir.resolve()):
+        raise HTTPException(status_code=404, detail="Heatmap not found")
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Heatmap image is missing")
     return FileResponse(image_path, media_type="image/png")
