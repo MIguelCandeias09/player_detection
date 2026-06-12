@@ -4,7 +4,7 @@ import json
 import subprocess
 import uuid
 import time
-from functools import lru_cache
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +63,31 @@ def missing_required_models() -> list[dict[str, Any]]:
     return [status for status in model_statuses() if not status["exists"]]
 
 
-@lru_cache(maxsize=1)
+def ttl_cache(ttl_seconds: float):
+    """Cache a zero-arg function result for ttl_seconds, with .cache_clear()."""
+
+    def decorator(func):
+        state = {"value": None, "expires": 0.0}
+
+        @wraps(func)
+        def wrapper():
+            now = time.monotonic()
+            if state["value"] is None or now >= state["expires"]:
+                state["value"] = func()
+                state["expires"] = now + ttl_seconds
+            return state["value"]
+
+        def cache_clear() -> None:
+            state["value"] = None
+            state["expires"] = 0.0
+
+        wrapper.cache_clear = cache_clear
+        return wrapper
+
+    return decorator
+
+
+@ttl_cache(ttl_seconds=60)
 def processor_status() -> dict[str, Any]:
     status = {
         "executable": str(PYTHON_EXECUTABLE),
@@ -118,7 +142,7 @@ def processor_status() -> dict[str, Any]:
     return status
 
 
-@lru_cache(maxsize=1)
+@ttl_cache(ttl_seconds=600)
 def cuda_status() -> dict[str, Any]:
     if not PYTHON_EXECUTABLE.exists():
         return {
@@ -210,7 +234,10 @@ def allowed_heatmap_files(stats_path: Path) -> set[str]:
 
 
 @app.get("/api/system")
-def get_system() -> dict[str, Any]:
+def get_system(refresh: bool = False) -> dict[str, Any]:
+    if refresh:
+        processor_status.cache_clear()
+        cuda_status.cache_clear()
     models = model_statuses()
     processor = processor_status()
     return {

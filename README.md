@@ -5,9 +5,9 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-red.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Liga Portugal](https://img.shields.io/badge/Liga%20Portugal-2024%2F25-green.svg)](#)
 
-Real-time computer vision system for analyzing professional football match footage from **Liga Portugal 2024/25**. Detects players, goalkeepers, referees, and the ball; tracks persistent identities across frames; classifies teams by uniform color; and projects tactical positions onto a 2D pitch radar.
+Real-time computer vision system for analyzing professional football match footage from **Liga Portugal 2024/25**. Detects players, goalkeepers, referees, and the ball; tracks persistent identities across frames; classifies teams from segmentation masks; and projects tactical positions onto a 2D pitch radar.
 
-**~25 FPS** on NVIDIA RTX 4070 | **6 operational modes** | **Single-pass ball interpolation**
+**~25 FPS** on NVIDIA RTX 4070 | **6 operational modes** | **Web UI (React + FastAPI)** | **Single-pass ball interpolation**
 
 ---
 
@@ -15,14 +15,15 @@ Real-time computer vision system for analyzing professional football match foota
 
 | Capability | Method | Model |
 |---|---|---|
-| **Player Detection** | YOLOv12-Large (4 classes: ball, GK, player, referee) | `player_y12l_footar_best.pt` |
-| **Ball Detection** | YOLOv11-Medium + InferenceSlicer (640×640 tiles) | `ball_y11m_footar_best.pt` |
+| **Player Detection** | YOLOv11-Medium **Segmentation** (4 classes: ball, GK, player, referee) | `yolo11m_seg_players.pt` |
+| **Ball Detection** | YOLOv11-Medium @ 1280px | `ball_y11m_1280_footar_best.pt` |
 | **Pitch Keypoints** | YOLOv11-Medium Pose (32 keypoints, FIFA standard) | `pitch_v11m_640_footar_best.pt` |
 | **Multi-Object Tracking** | BoT-SORT with GMC (Sparse Optical Flow, 60-frame buffer) | Native YOLO `.track()` |
-| **Team Classification** | HSV 2D Histogram → K-Means → Temporal Voting + Soft Lock | Unsupervised (no model) |
+| **Team Classification** | Segmentation masks → 3D HSV Histogram → K-Means → Temporal Voting + Lock | Unsupervised (no model) |
 | **Ball Interpolation** | Real-time single-pass linear interpolation (30-frame buffer) | Algorithmic |
 | **Tactical Radar** | Homography projection (cv2.findHomography → 2D pitch) | Geometric |
-
+| **Match Stats** | Possession, distance, heatmaps, 2D positions export (`stats.json` / `positions.json`) | Algorithmic |
+ 
 ### Processing Modes
 
 ```
@@ -30,8 +31,8 @@ PITCH_DETECTION      →  Visualize detected pitch keypoints with confidence col
 PLAYER_DETECTION     →  Bounding box detection of all players/GK/referees
 BALL_DETECTION       →  Ball tracking with real-time interpolation for missed frames
 PLAYER_TRACKING      →  Persistent IDs via BoT-SORT with camera motion compensation
-TEAM_CLASSIFICATION  →  Color-based team assignment with temporal voting
-RADAR                →  Full pipeline: detection + tracking + teams + 2D pitch radar
+TEAM_CLASSIFICATION  →  Mask-based team assignment with temporal voting
+RADAR                →  Full pipeline: detection + tracking + teams + 2D pitch radar + stats
 ```
 
 ---
@@ -39,43 +40,46 @@ RADAR                →  Full pipeline: detection + tracking + teams + 2D pitch
 ## Architecture
 
 ```
-FootAR/
+player_detection/
 ├── src/                        # Application source code
-│   ├── main.py                 # CLI entry point (all 6 modes)
+│   ├── main_seg.py             # ★ ACTIVE entry point (segmentation pipeline, all 6 modes)
+│   ├── main.py                 # Legacy (bbox pipeline) — kept for reference only
+│   ├── main_1.py               # Legacy variant — kept for reference only
+│   ├── main_miguel.py          # Legacy variant — kept for reference only
 │   └── sports/                 # Core library
 │       ├── annotators/         # Pitch drawing, point projection
-│       ├── common/             # Ball tracker, interpolator, team classifier, view transformer
-│       └── configs/            # Soccer pitch geometry (32 vertices, FIFA dimensions)
+│       ├── common/             # Ball tracker, interpolator, team classifiers, view transformer
+│       ├── configs/            # Soccer pitch geometry (32 vertices, FIFA dimensions)
+│       ├── distance_tracker.py # Per-player distance covered
+│       ├── possession_tracker.py # Team possession estimation
+│       ├── heatmap_tracker.py  # Position heatmaps
+│       ├── stats_export.py     # stats.json writer
+│       └── positions_export.py # positions.json writer (2D pitch coordinates)
 │
-├── configs/                    # Runtime configuration
-│   └── futebol_botsort.yaml    # BoT-SORT tracker parameters
+├── web/                        # Local Web UI
+│   ├── backend/                # FastAPI wrapper (jobs, live preview, stats API)
+│   └── frontend/               # React + Vite interface
 │
-├── models/                     # YOLO model weights
-│   ├── active/                 # Production models (loaded by main.py)
-│   │   ├── player_y12l_footar_best.pt
-│   │   ├── ball_y11m_footar_best.pt
+├── configs/                    # BoT-SORT tracker parameters (YAML)
+├── models/
+│   ├── active/                 # Production models (loaded by main_seg.py)
+│   │   ├── yolo11m_seg_players.pt
+│   │   ├── ball_y11m_1280_footar_best.pt
 │   │   └── pitch_v11m_640_footar_best.pt
 │   └── archive/                # Previous experiments (kept for reproducibility)
 │
-├── training/                   # Model training pipeline
-│   ├── notebooks/              # Jupyter notebooks for player/ball/pitch training
-│   └── datasets/               # YOLO-format datasets (gitignored)
-│
-├── tests/                      # Test suite
-│   ├── test_interpolation.py   # Ball interpolator unit tests
-│   └── check_metrics.py        # Training metrics analyzer
-│
+├── training/                   # Model training notebooks + datasets (gitignored)
+├── tests/                      # Test suite (pytest)
 ├── docs/                       # Technical documentation
-├── scripts/                    # Setup & utility scripts
+├── scripts/                    # Legacy roboflow/sports setup (not used by the pipeline)
 ├── videos/                     # Input/output video data (gitignored)
-│   ├── input/                  # Source match footage
-│   ├── output/                 # Processed results
-│   └── raw/                    # Uncut VSports recordings
-│
-├── requirements.txt            # Python dependencies
-├── check_system.py             # Sanity check script
-└── project_structure.md        # Architecture audit document
+├── requirements.txt            # Python dependencies (single source of truth)
+└── check_system.py             # Sanity check script
 ```
+
+> **Note:** `src/main.py`, `src/main_1.py`, and `src/main_miguel.py` are earlier
+> iterations of the pipeline kept for historical reference. All current
+> development happens in `src/main_seg.py` — the web backend and docs target it.
 
 ---
 
@@ -101,40 +105,46 @@ pip install -r requirements.txt
 python check_system.py
 ```
 
-This script validates that all model files, dependencies, and Python imports resolve correctly.
-
-### 3. Run the Pipeline
+### 3. Run the Pipeline (CLI)
 
 ```bash
-# Full RADAR mode (detection + tracking + teams + pitch projection)
-python src/main.py \
+# Full RADAR mode (detection + tracking + teams + pitch projection + stats)
+python src/main_seg.py \
     --source_video_path videos/input/lp1/round1/goal_01.mp4 \
     --target_video_path output.mp4 \
     --device cuda \
     --mode RADAR
 
 # Real-time display (no output file)
-python src/main.py \
+python src/main_seg.py \
     --source_video_path videos/input/lp1/round1/goal_01.mp4 \
     --device cuda \
     --mode TEAM_CLASSIFICATION
 
-# Process entire directory
-python src/main.py \
-    --source_video_path videos/input/lp1/round1/ \
-    --target_video_path videos/output/lp1/round1/ \
-    --device cuda \
-    --mode RADAR
-
-# CPU fallback
-python src/main.py \
+# Headless with stats export
+python src/main_seg.py \
     --source_video_path video.mp4 \
     --target_video_path out.mp4 \
-    --device cpu \
-    --mode PLAYER_DETECTION
+    --stats_output_dir stats_out \
+    --no_preview \
+    --mode RADAR
 ```
 
-### CLI Arguments
+### 4. Run the Web UI (recommended)
+
+```powershell
+# Backend (from player_detection/) — use the inference environment
+python -m web.backend
+
+# Frontend (from player_detection/web/frontend/)
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. See [web/README.md](web/README.md) for processor
+Python selection (`FOOTAR_PYTHON` / `.env`) and the API reference.
+
+### CLI Arguments (`src/main_seg.py`)
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
@@ -143,32 +153,43 @@ python src/main.py \
 | `--device` | `str` | `cuda` | `cuda` or `cpu` |
 | `--mode` | `Mode` | `RADAR` | Processing mode (see above) |
 | `--debug` | `flag` | `False` | Save team classification debug images |
-| `--debug_output_dir` | `str` | `debug_team_output` | Debug image output directory |
+| `--debug_output_dir` | `str` | `None` | Debug image output directory |
+| `--stats_output_dir` | `str` | `None` | Directory for `stats.json`, `positions.json`, heatmap PNGs |
+| `--player_track_imgsz` | `int` | `1024` | Player tracking inference size (RADAR) |
+| `--pitch_every_n_frames` | `int` | `5` | Run pitch detection every N frames (RADAR) |
+| `--ball_track_imgsz` | `int` | `960` | Ball tracking inference size (RADAR) |
+| `--ball_track_every_n_frames` | `int` | `2` | Run ball tracking every N frames (RADAR) |
+| `--ball_track_conf` | `float` | `0.25` | Ball tracking confidence threshold (RADAR) |
+| `--ball_max_hold_frames` | `int` | `3` | Keep last ball detection for N missed frames |
+| `--no_preview` | `flag` | `False` | Disable OpenCV preview windows (headless) |
+| `--structured_logs` | `flag` | `False` | Emit machine-readable `FOOTAR_EVENT` JSON progress |
+| `--live_frame_dir` | `str` | `None` | Publish latest processed frame as `latest.jpg` |
+| `--live_frame_every` | `int` | `1` | Publish one live frame every N processed frames |
 
 ---
 
 ## Team Classification Pipeline
 
-The team classifier uses an unsupervised approach — no labeled training data required:
+The team classifier (`sports/common/team_seg.py`) uses an unsupervised,
+segmentation-based approach — no labeled training data required:
 
 ```
-Frame → Player Crop (top 50%, center 60%)
-      → HSV Green Mask (remove grass pixels)
-      → 2D Histogram (Hue × Saturation, 8×8 = 64 features)
+Frame → Segmentation Mask (yolo11m-seg: exact player pixels, no grass/background)
+      → 3D HSV Histogram (Hue 8 × Saturation 8 × Value 4 = 256 features)
       → K-Means (k=2, k-means++ init)
-      → Temporal Voting (30-frame sliding window)
-      → Soft Lock (consistent assignment after 30 frames)
+      → Temporal Voting (20-frame sliding window)
+      → Lock (consistent assignment after 20 frames)
       → GK Override (>70% goalkeeper class → neutral team)
 ```
 
-Enable debug mode to visualize each stage:
+The Value channel in the histogram discriminates teams with similar hues
+(e.g. dark red vs. light red kits). Enable debug mode to visualize each stage:
 
 ```bash
-python src/main.py \
+python src/main_seg.py \
     --source_video_path video.mp4 \
     --mode TEAM_CLASSIFICATION \
-    --debug \
-    --debug_output_dir docs/images/pipeline
+    --debug
 ```
 
 ---
@@ -181,26 +202,24 @@ Training notebooks are in `training/notebooks/`:
 
 | Notebook | Purpose | Base Model |
 |---|---|---|
-| `train_player_detector.ipynb` | Player/GK/Referee/Ball detection | YOLOv12-Large |
+| `train_player_detector.ipynb` | Player/GK/Referee/Ball detection | YOLOv11/12 |
 | `train_ball_detector.ipynb` | Ball-only detection (high recall) | YOLOv11-Medium |
 | `train_pitch_keypoint_detector.ipynb` | 32-keypoint pitch pose | YOLOv11-Medium Pose |
 
-Datasets live in `training/datasets/` (gitignored). Download from Roboflow:
-- [football-players-and-ball](https://universe.roboflow.com/) — 4 classes
-- [football-ball-detection](https://universe.roboflow.com/) — ball only
-- [football-field-detection](https://universe.roboflow.com/) — 32 keypoints
-
-After training, copy `best.pt` to `models/active/` and update the path constant in `src/main.py`.
+After training, copy `best.pt` to `models/active/` and update the path constant
+in `src/main_seg.py` **and** `web/backend/config.py` (`REQUIRED_MODELS`).
 
 ### Running Tests
 
 ```bash
-# Ball interpolation unit tests
-python tests/test_interpolation.py
+# Python suite (interpolation, exports, trackers, web backend)
+python -m pytest tests/ --ignore=tests/test_seg.py
 
-# Analyze training metrics from CSV logs
-python tests/check_metrics.py
+# Frontend suite (from web/frontend/)
+npx vitest run
 ```
+
+`tests/test_seg.py` requires the YOLO models and a GPU — run it manually.
 
 ### BoT-SORT Tracker Tuning
 
@@ -223,18 +242,9 @@ match_thresh: 0.8        # IOU matching threshold
 | [Meeting Summary](docs/RESUMO_TECNICO_REUNIAO.md) | Team classification, interpolation, and BoT-SORT improvements |
 | [BoT-SORT Migration](docs/BOTSORT_REFACTOR.md) | Norfair/ByteTrack → BoT-SORT refactoring details |
 | [Interpolation Refactor](docs/INTERPOLATION_REFACTOR.md) | Dual-pass → single-pass ball interpolation architecture |
+| [Web UI Guide](web/README.md) | Backend/frontend setup, processor Python selection, API reference |
 | [CLI Examples](docs/run_examples.md) | Tested command-line invocations |
 | [Install Guide](docs/install_instructions.md) | Step-by-step environment setup |
-
----
-
-## Model Performance
-
-| Model | mAP50 | Recall | Precision | Input Size |
-|---|---|---|---|---|
-| Player (YOLOv12-L) | 98.9% (player) | 97.1% (GK) | 96.7% (referee) | 1280px |
-| Ball (YOLOv11-M) | 74.6% | 68.0% | 87.9% | 1024px |
-| Pitch (YOLOv11-M Pose) | 65.8% | — | — | 640px |
 
 ---
 

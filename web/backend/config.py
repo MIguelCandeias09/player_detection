@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = PROJECT_ROOT / ".env"
 MAIN_SEG_PATH = PROJECT_ROOT / "src" / "main_seg.py"
 RUNTIME_DIR = PROJECT_ROOT / ".footar_runtime"
 UPLOADS_DIR = RUNTIME_DIR / "uploads"
@@ -47,6 +48,24 @@ REQUIRED_MODELS = {
 }
 
 PROCESSOR_REQUIRED_MODULES = ("supervision", "torch", "ultralytics")
+
+
+def read_env_file(path: Path = ENV_FILE) -> dict[str, str]:
+    """Parse a simple KEY=VALUE .env file without external dependencies."""
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip().strip('"').strip("'")
+        if key.strip():
+            values[key.strip()] = value
+    return values
 
 
 def processor_python_candidates() -> list[tuple[Path, str]]:
@@ -97,7 +116,12 @@ def python_has_required_modules(python_path: Path) -> bool:
 def resolve_processor_python() -> tuple[Path, str]:
     configured = os.environ.get("FOOTAR_PYTHON")
     if configured:
-        return Path(configured), "FOOTAR_PYTHON"
+        return Path(configured), "FOOTAR_PYTHON env var"
+
+    env_file_values = read_env_file()
+    configured = env_file_values.get("FOOTAR_PYTHON")
+    if configured:
+        return Path(configured), ".env file"
 
     for path, source in processor_python_candidates():
         if python_has_required_modules(path):

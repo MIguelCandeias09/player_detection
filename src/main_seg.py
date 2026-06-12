@@ -101,15 +101,21 @@ ELLIPSE_LABEL_ANNOTATOR = sv.LabelAnnotator(
     text_position=sv.Position.BOTTOM_CENTER,
 )
 
-startT = time.perf_counter()
-performance_times = {}
-def performanceMeter(desc: str = ''):
-    global startT, performance_times
-    
-    elapsed = time.perf_counter() - startT
-    if desc:
-        performance_times[desc] = elapsed
-    startT = time.perf_counter()
+class Stopwatch:
+    """Mede o tempo de cada etapa do pipeline (substitui o antigo estado global)."""
+
+    def __init__(self):
+        self.times = {}
+        self._start = time.perf_counter()
+
+    def lap(self, desc: str = ''):
+        elapsed = time.perf_counter() - self._start
+        if desc:
+            self.times[desc] = elapsed
+        self._start = time.perf_counter()
+
+
+STOPWATCH = Stopwatch()
 
 class Mode(Enum):
     """
@@ -641,7 +647,7 @@ def run_radar(
     structured_logs: bool = False,
 ) -> Iterator[np.ndarray]:
     print('run_radar')
-    performanceMeter()
+    STOPWATCH.lap()
 
     video_info = sv.VideoInfo.from_video_path(video_path=source_video_path)
     print('video_info', video_info)
@@ -653,13 +659,13 @@ def run_radar(
         player_detection_model = YOLO(PLAYER_DETECTION_MODEL_PATH).to(device=device)
     pitch_detection_model = YOLO(PITCH_DETECTION_MODEL_PATH).to(device=device)
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path, stride=STRIDE)
-    performanceMeter('initializing models')
+    STOPWATCH.lap('initializing models')
 
     # Initialize TeamClassifierSeg (seg-mask based)
     team_classifier = TeamClassifierSeg()
     print('✅ TeamClassifierSeg initialized (segmentation mask mode)')
     
-    performanceMeter('initializing team classifier')
+    STOPWATCH.lap('initializing team classifier')
 
     ## store all teamIds for each tracker Id
     # frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
@@ -683,7 +689,7 @@ def run_radar(
     #         if str(tempDetections[i].tracker_id[j]) not in outsideTrackerIds_Team:
     #             outsideTrackerIds_Team[str(tempDetections[i].tracker_id[j])] = []
     #         outsideTrackerIds_Team[str(tempDetections[i].tracker_id[j])].append(int(tempTeamIds[i][j]))
-    # performanceMeter('classifying all crops to teamIds')
+    # STOPWATCH.lap('classifying all crops to teamIds')
 
 
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
@@ -715,7 +721,7 @@ def run_radar(
     for frame in frame_generator:
         # print('        new frame')
         frameStartT = time.perf_counter()
-        performanceMeter()
+        STOPWATCH.lap()
         frame_counter += 1
 
         # Pitch detection só a cada N frames (reutiliza os últimos keypoints)
@@ -776,7 +782,7 @@ def run_radar(
                 else:
                     last_keypoints = keypoints
 
-        performanceMeter('getting Player and Pitch detections')
+        STOPWATCH.lap('getting Player and Pitch detections')
 
         # Separar players e extrair as suas máscaras na mesma ordem
         player_bool = detections.class_id == PLAYER_CLASS_ID
@@ -808,7 +814,7 @@ def run_radar(
                 print(f"   🔴 Team 0 (RED): {team0_count} players")
                 print(f"   🔵 Team 1 (BLUE): {team1_count} players")
 
-        performanceMeter('assigning player teams with voting')
+        STOPWATCH.lap('assigning player teams with voting')
 
         goalkeepers = detections[detections.class_id == GOALKEEPER_CLASS_ID]
         # goalkeepers_team_id = resolve_goalkeepers_team_id(players, players_team_id, goalkeepers)
@@ -862,7 +868,7 @@ def run_radar(
             else:
                 balls = sv.Detections.empty()
 
-        performanceMeter(
+        STOPWATCH.lap(
             f'ball tracking (imgsz={ball_track_imgsz}, every={ball_track_every_n_frames}, conf={ball_track_conf:.2f}, hold={ball_max_hold_frames}, gmc=off)'
         )
 
@@ -1021,10 +1027,9 @@ def run_radar(
                           (text_x, text_y), 
                           font, font_scale, color, thickness, cv2.LINE_AA)
             
-            performanceMeter('annotating frame with Elipse, and Ball')
+            STOPWATCH.lap('annotating frame with Elipse, and Ball')
 
             # Render radar with interpolated ball
-            startT = time.perf_counter()
             RADAR_SCALE = 4
             h, w, _ = annotated_frame.shape
             
@@ -1048,14 +1053,14 @@ def run_radar(
                 )
                 annotated_frame = sv.draw_image(annotated_frame, radar, opacity=0.5, rect=rect)
 
-            performanceMeter('rendering Radar in frame')
+            STOPWATCH.lap('rendering Radar in frame')
             
             # Print detailed timing every 30 frames
             total_frame_time = time.perf_counter() - frameStartT
             if oldest_data['frame_counter'] % 30 == 0:
                 print(f'\n=== Frame {oldest_data["frame_counter"]} Performance (delayed output) ===')
                 print(f'Total frame time: {total_frame_time*1000:.1f}ms ({1/total_frame_time:.1f} FPS)')
-                for desc, t in performance_times.items():
+                for desc, t in STOPWATCH.times.items():
                     print(f'  {desc}: {t*1000:.1f}ms')
             
             yield annotated_frame

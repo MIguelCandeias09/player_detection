@@ -10,16 +10,25 @@ From `player_detection/`:
 python -m web.backend
 ```
 
-Run the backend with the same Python environment used for inference. It must have
-`torch`, `supervision`, `ultralytics`, `fastapi`, `uvicorn`, and
-`python-multipart` installed. On this machine the working CUDA environment is:
+The backend itself only needs `fastapi`, `uvicorn`, and `python-multipart`. The
+inference processor (`src/main_seg.py`) runs in a separate Python that must have
+`torch`, `supervision`, and `ultralytics` installed.
+
+The processor Python is resolved in this order:
+
+1. `FOOTAR_PYTHON` environment variable
+2. `FOOTAR_PYTHON` entry in `player_detection/.env` (copy `.env.example` to `.env`)
+3. Auto-detected known venvs (project `.venv`, `FootAR_V2/.venv`, `FootAR_old/.venv`)
+4. The backend's own Python (fallback)
+
+Recommended setup — create a `.env` once per machine:
 
 ```powershell
-C:\VS-Projects\FootAR\FootAR_old\.venv\Scripts\python.exe -m web.backend
+Copy-Item .env.example .env
+# edit .env and point FOOTAR_PYTHON at your inference venv
 ```
 
-The backend also auto-detects the known inference venv when it exists. To force a
-specific processor Python, set `FOOTAR_PYTHON` before starting the backend:
+Or override per-session:
 
 ```powershell
 $env:FOOTAR_PYTHON="C:\VS-Projects\FootAR\FootAR_old\.venv\Scripts\python.exe"

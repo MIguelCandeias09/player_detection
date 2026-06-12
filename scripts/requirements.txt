@@ -1,2 +1,4 @@
+# LEGACY — only used by scripts/setup.sh (original roboflow/sports model download).
+# The project's real dependency list is the root requirements.txt.
 ultralytics
 gdown

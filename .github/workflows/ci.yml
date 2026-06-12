@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Targeted install: the full requirements.txt pulls CUDA torch (~2 GB),
+      # which the unit tests do not need. test_seg.py (models + GPU) is skipped.
+      - name: Install test dependencies
+        run: >
+          pip install pytest httpx fastapi uvicorn python-multipart
+          numpy supervision opencv-python-headless scikit-learn
+
+      - name: Run pytest
+        run: python -m pytest tests/ --ignore=tests/test_seg.py -v
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest
+        run: npx vitest run
+
+      - name: Build production bundle
+        run: npm run build

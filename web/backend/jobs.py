@@ -226,6 +226,8 @@ def build_processing_command(job: JobRecord) -> list[str]:
 
 
 def parse_progress_line(line: str) -> dict[str, Any] | None:
+    # Primary channel: structured FOOTAR_EVENT JSON lines emitted by main_seg.py
+    # (--structured_logs is always passed by build_processing_command).
     if line.startswith(EVENT_PREFIX):
         try:
             payload = json.loads(line[len(EVENT_PREFIX) :])
@@ -233,6 +235,8 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
             return None
         return payload if isinstance(payload, dict) else None
 
+    # Fallback only: scrape the human-readable progress print in case structured
+    # events are unavailable. Do not rely on this format for new features.
     match = PROGRESS_RE.search(line)
     if not match:
         return None

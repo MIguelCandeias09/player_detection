@@ -1,5 +1,6 @@
-export async function fetchSystem() {
-  const response = await fetch("/api/system");
+export async function fetchSystem(options = {}) {
+  const url = options.refresh ? "/api/system?refresh=true" : "/api/system";
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error("Nao foi possivel obter o estado do sistema");
   }
