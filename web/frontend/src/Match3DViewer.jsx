@@ -7,6 +7,14 @@ import * as THREE from "three";
 import { Loader2, Pause, Play } from "lucide-react";
 import { fetchPositions } from "./api.js";
 import { createPitchCanvas, PITCH_LENGTH, PITCH_WIDTH } from "./pitchTexture.js";
+import {
+  buildIndex,
+  dampingAlpha,
+  HOLD_SECONDS,
+  samplePositions,
+  shouldSnap,
+  toScene
+} from "./matchData.js";
 
 // Paleta alinhada com o radar do pipeline (COLORS em main_seg.py)
 const TEAM_COLORS = {
@@ -16,88 +24,11 @@ const TEAM_COLORS = {
   ref: "#FFD700" // Árbitro
 };
 
-const HOLD_SECONDS = 0.8; // tempo que um jogador "aguenta" sem deteções antes de desaparecer
-
 function entityColor(t, c) {
   if (t === 0 || t === 1) return TEAM_COLORS[t];
   if (c === 1) return TEAM_COLORS.gk;
   if (c === 3) return TEAM_COLORS.ref;
   return "#9e9e9e";
-}
-
-function toScene(x, y) {
-  // dados: x 0..105 (comprimento), y 0..68 (largura), origem no canto superior esquerdo
-  return [x - PITCH_LENGTH / 2, y - PITCH_WIDTH / 2];
-}
-
-function buildIndex(data) {
-  const frames = data.frames || [];
-  if (frames.length === 0) return null;
-  const firstI = frames[0].i;
-  const lastI = frames[frames.length - 1].i;
-  const fps = data.fps || 25;
-
-  const roster = new Map();
-  for (const frame of frames) {
-    for (const p of frame.players) {
-      roster.set(p.id, { t: p.t, c: p.c });
-    }
-  }
-
-  return {
-    frames,
-    firstI,
-    lastI,
-    fps,
-    duration: Math.max((lastI - firstI) / fps, 0.04),
-    roster
-  };
-}
-
-// Frame mais próximo (binary search): maior idx com frames[idx].i <= f
-function findFrameIndex(frames, f) {
-  let lo = 0;
-  let hi = frames.length - 1;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (frames[mid].i <= f) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
-}
-
-function samplePositions(index, timeSec, out) {
-  const { frames, firstI, fps } = index;
-  const f = firstI + timeSec * fps;
-  const idxA = findFrameIndex(frames, f);
-  const frameA = frames[idxA];
-  const frameB = frames[Math.min(idxA + 1, frames.length - 1)];
-  const gap = frameB.i - frameA.i;
-  // Não interpolar através de buracos longos (homografia perdida > 1 s)
-  let alpha = gap > 0 && gap <= fps ? (f - frameA.i) / gap : 0;
-  alpha = Math.max(0, Math.min(1, alpha));
-
-  out.players.clear();
-  const posB = new Map();
-  if (alpha > 0) {
-    for (const p of frameB.players) posB.set(p.id, p);
-  }
-  for (const p of frameA.players) {
-    const b = posB.get(p.id);
-    out.players.set(p.id, {
-      x: b ? p.x + (b.x - p.x) * alpha : p.x,
-      y: b ? p.y + (b.y - p.y) * alpha : p.y
-    });
-  }
-
-  const ballA = frameA.ball;
-  const ballB = alpha > 0 ? frameB.ball : null;
-  if (ballA && ballB) {
-    out.ball = { x: ballA.x + (ballB.x - ballA.x) * alpha, y: ballA.y + (ballB.y - ballA.y) * alpha };
-  } else {
-    out.ball = ballA || null;
-  }
-  return out;
 }
 
 function Pitch() {
@@ -195,6 +126,7 @@ function Scene({ index, storeRef }) {
     }
     const time = store.time;
     samplePositions(index, time, sample.current);
+    const alpha = dampingAlpha(delta);
 
     for (const [id] of rosterEntries) {
       const group = playerRefs.current.get(id);
@@ -202,13 +134,23 @@ function Scene({ index, storeRef }) {
       const pos = sample.current.players.get(id);
       if (pos) {
         const [sx, sz] = toScene(pos.x, pos.y);
-        group.position.set(sx, 0, sz);
-        group.visible = true;
+        const dx = sx - group.position.x;
+        const dz = sz - group.position.z;
+        if (!group.visible || shouldSnap(dx, dz)) {
+          // Reaparecimento ou seek: saltar para o sítio e crescer a partir do chão
+          group.position.set(sx, 0, sz);
+          if (!group.visible) group.scale.setScalar(0.01);
+        } else {
+          group.position.x += dx * alpha;
+          group.position.z += dz * alpha;
+        }
         lastSeen.current.set(id, time);
-      } else {
-        const seen = lastSeen.current.get(id);
-        group.visible = seen !== undefined && Math.abs(time - seen) < HOLD_SECONDS;
       }
+      const seen = lastSeen.current.get(id);
+      const held = Boolean(pos) || (seen !== undefined && Math.abs(time - seen) < HOLD_SECONDS);
+      const scale = group.scale.x + ((held ? 1 : 0) - group.scale.x) * alpha;
+      group.scale.setScalar(Math.max(scale, 0.0001));
+      group.visible = scale > 0.02;
     }
 
     if (ballRef.current) {

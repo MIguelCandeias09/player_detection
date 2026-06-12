@@ -8,7 +8,8 @@ class ViewTransformer:
     def __init__(
             self,
             source: npt.NDArray[np.float32],
-            target: npt.NDArray[np.float32]
+            target: npt.NDArray[np.float32],
+            ransac_reproj_threshold: float | None = 300.0
     ) -> None:
         """
         Initialize the ViewTransformer with source and target points.
@@ -16,6 +17,11 @@ class ViewTransformer:
         Args:
             source (npt.NDArray[np.float32]): Source points for homography calculation.
             target (npt.NDArray[np.float32]): Target points for homography calculation.
+            ransac_reproj_threshold (float | None): Maximum reprojection error, in
+                target units, for a correspondence to count as inlier (RANSAC).
+                In this project targets are pitch coordinates in cm, so the
+                default 300.0 means 3 m. Only applied with more than 4 points;
+                None disables outlier rejection (plain least-squares).
 
         Raises:
             ValueError: If source and target do not have the same shape or if they are
@@ -28,7 +34,13 @@ class ViewTransformer:
 
         source = source.astype(np.float32)
         target = target.astype(np.float32)
-        self.m, _ = cv2.findHomography(source, target)
+        self.m = None
+        if ransac_reproj_threshold is not None and len(source) > 4:
+            self.m, _ = cv2.findHomography(
+                source, target, cv2.RANSAC, ransac_reproj_threshold
+            )
+        if self.m is None:
+            self.m, _ = cv2.findHomography(source, target)
         if self.m is None:
             raise ValueError("Homography matrix could not be calculated.")
 
